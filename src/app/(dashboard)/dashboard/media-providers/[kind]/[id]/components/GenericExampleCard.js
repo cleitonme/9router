@@ -55,6 +55,8 @@ export function GenericExampleCard({ providerId, kind }) {
 
   const [input, setInput] = useState(safeExConfig.defaultInput || "");
   const [question, setQuestion] = useState("Does this request require urgent attention?");
+  const [sysMode, setSysMode] = useState("single"); // systemone only: single | auto | combo
+  const [comboModels, setComboModels] = useState("ts/jev-latest\noc/jev-1.13-free");
   const [refImage, setRefImage] = useState("");
   const [maskImage, setMaskImage] = useState("");
   const [extraValues, setExtraValues] = useState(() =>
@@ -126,12 +128,23 @@ export function GenericExampleCard({ providerId, kind }) {
       },
     },
   } : {};
+  // SystemOne routing modes: single (one provider/model), auto (server picks),
+  // combo (ordered fallback list). The server strips these fields before upstream.
+  const sysModeList = kind === "systemone" && sysMode === "combo"
+    ? comboModels.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean)
+    : [];
+  const sysModeFields = kind !== "systemone" ? {}
+    : sysMode === "auto" ? { mode: "auto" }
+    : sysMode === "combo" ? { mode: "combo", models: sysModeList }
+    : {};
+  const effectiveModel = kind === "systemone" && sysMode === "auto" ? "auto" : modelFull;
   const requestBody = {
-    model: modelFull,
+    model: effectiveModel,
     [exConfig.bodyKey]: input,
     ...exConfig.extraBody,
     ...extraBodyFromFields,
     ...systemoneQuestions,
+    ...sysModeFields,
     ...(supportsEdit && effectiveRefImage ? { image: effectiveRefImage } : {}),
     ...(supportsMask && effectiveMaskImage ? { mask_image: effectiveMaskImage } : {}),
   };
@@ -146,7 +159,7 @@ export function GenericExampleCard({ providerId, kind }) {
   -d '${JSON.stringify(requestBody)}'${wantBinary ? " \\\n  --output image.png" : ""}`;
 
   const handleRun = async () => {
-    if (!input.trim() || !modelFull) return;
+    if (!input.trim() || !effectiveModel) return;
     setRunning(true);
     setError("");
     setResult(null);
@@ -159,7 +172,7 @@ export function GenericExampleCard({ providerId, kind }) {
       if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
       if (pinnedConnectionId) headers["x-connection-id"] = pinnedConnectionId;
       if (useStreaming) headers["Accept"] = "text/event-stream";
-      const body = { ...requestBody, model: modelFull };
+      const body = { ...requestBody, model: effectiveModel };
       const res = await fetch(`/api${apiPathWithQuery}`, {
         method: kindConfig.endpoint.method,
         headers,
@@ -238,6 +251,9 @@ export function GenericExampleCard({ providerId, kind }) {
     return out;
   };
   const resultJson = result ? JSON.stringify(maskB64(result.data), null, 2) : "";
+  const responsePlaceholder = kind === "systemone" && sysMode !== "single" && safeExConfig.autoResponse
+    ? safeExConfig.autoResponse
+    : exConfig.defaultResponse;
 
   return (
     <Card>
@@ -266,6 +282,34 @@ export function GenericExampleCard({ providerId, kind }) {
             />
           </Row>
         ) : null}
+
+        {/* SystemOne routing mode */}
+        {kind === "systemone" && (
+          <Row label="Mode">
+            <select
+              value={sysMode}
+              onChange={(e) => setSysMode(e.target.value)}
+              className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+            >
+              <option value="single">Single model</option>
+              <option value="auto">Auto (server picks provider)</option>
+              <option value="combo">Combo (ordered fallback list)</option>
+            </select>
+          </Row>
+        )}
+
+        {/* Combo model list — one provider/model per line */}
+        {kind === "systemone" && sysMode === "combo" && (
+          <Row label="Models">
+            <textarea
+              value={comboModels}
+              onChange={(e) => setComboModels(e.target.value)}
+              rows={3}
+              placeholder={"ts/jev-latest\noc/jev-1.13-free"}
+              className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary font-mono"
+            />
+          </Row>
+        )}
 
         {/* Endpoint */}
         <Row label="Endpoint">
@@ -496,7 +540,7 @@ export function GenericExampleCard({ providerId, kind }) {
               </button>
             <button
               onClick={handleRun}
-              disabled={running || !input.trim() || !modelFull}
+              disabled={running || !input.trim() || !effectiveModel}
               className="flex w-full sm:w-auto items-center justify-center gap-1.5 px-3 py-1 rounded-lg bg-primary text-white text-xs font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
                 <span className="material-symbols-outlined text-[14px]" style={running ? { animation: "spin 1s linear infinite" } : undefined}>
@@ -556,7 +600,7 @@ export function GenericExampleCard({ providerId, kind }) {
             )}
           </div>
           <pre className="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre-wrap break-all opacity-70">
-            {result ? resultJson : exConfig.defaultResponse}
+            {result ? resultJson : responsePlaceholder}
           </pre>
           {kind === "image" && (binaryImageUrl || result?.data?.data?.[0]) && (
             <div className="mt-2">

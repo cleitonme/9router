@@ -17,6 +17,9 @@ const DEFAULT_SETTINGS = {
   comboStrategy: "fallback",
   comboStickyRoundRobinLimit: 1,
   comboStrategies: {},
+  // SystemOne zero-config auto discovery (`model: "auto"` without a models
+  // list). Disable to require explicit models in auto/combo requests.
+  systemoneAutoEnabled: true,
   capacityAdapter: {
     vision: { enabled: true, roundRobin: false, models: [] },
     pdf: { enabled: false, roundRobin: false, models: [] },

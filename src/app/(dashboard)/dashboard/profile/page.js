@@ -292,6 +292,21 @@ export default function ProfilePage() {
     }
   };
 
+  const updateSystemoneAutoEnabled = async (enabled) => {
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ systemoneAutoEnabled: enabled }),
+      });
+      if (res.ok) {
+        setSettings(prev => ({ ...prev, systemoneAutoEnabled: enabled }));
+      }
+    } catch (err) {
+      console.error("Failed to update SystemOne auto setting:", err);
+    }
+  };
+
   const updateStickyLimit = async (limit) => {
     const numLimit = parseInt(limit);
     if (isNaN(numLimit) || numLimit < 1) return;
@@ -1490,6 +1505,21 @@ export default function ProfilePage() {
               <Toggle
                 checked={settings.comboStrategy === "round-robin"}
                 onChange={() => updateComboStrategy(settings.comboStrategy === "round-robin" ? "fallback" : "round-robin")}
+                disabled={loading}
+              />
+            </div>
+
+            {/* SystemOne Auto Discovery */}
+            <div className="flex items-start sm:items-center justify-between gap-4 pt-4 border-t border-border/50">
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-sm sm:text-base">SystemOne Auto Discovery</p>
+                <p className="text-xs sm:text-sm text-text-muted">
+                  Let {"model: \"auto\""} pick from providers with usable credentials (free lane first)
+                </p>
+              </div>
+              <Toggle
+                checked={settings.systemoneAutoEnabled !== false}
+                onChange={() => updateSystemoneAutoEnabled(!(settings.systemoneAutoEnabled !== false))}
                 disabled={loading}
               />
             </div>
