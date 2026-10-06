@@ -62,6 +62,14 @@ export const ERROR_RULES = [
   { text: "no credentials",           cooldownMs: COOLDOWN.long },
   { text: "request not allowed",      cooldownMs: COOLDOWN.short },
   { text: "improperly formed request", cooldownMs: COOLDOWN.long },
+  // Groq TPM / context-limit wording (underscore code + phrases). Checked
+  // before the generic 4xx no-fallback rule so 413/TPM always falls through
+  // to the next combo model instead of aborting with "failed (no fallback)".
+  { text: "rate_limit_exceeded",      backoff: true },
+  { text: "tokens per minute",        backoff: true },
+  { text: "request too large",        backoff: true },
+  { text: "too many tokens",          backoff: true },
+  { text: "tpm",                      backoff: true },
   { text: "rate limit",               backoff: true },
   { text: "too many requests",        backoff: true },
   { text: "quota exceeded",           backoff: true },
@@ -73,6 +81,9 @@ export const ERROR_RULES = [
   { status: 402, cooldownMs: COOLDOWN.long },
   { status: 403, cooldownMs: COOLDOWN.long },
   { status: 404, cooldownMs: COOLDOWN.long },
+  // 413 Payload Too Large (e.g. Groq context/TPM overflow) must fall back,
+  // never abort the combo. 429 keeps exponential backoff.
+  { status: 413, backoff: true },
   { status: 429, backoff: true },
 ];
 

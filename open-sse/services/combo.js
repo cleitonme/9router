@@ -3,6 +3,7 @@
  */
 
 import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
+import { isProviderBlocked } from "./groqPreflight.js";
 import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
@@ -299,6 +300,18 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
 
   for (let i = 0; i < rotatedModels.length; i++) {
     const modelStr = rotatedModels[i];
+    // Org-level TPM block: skip blocked providers without consuming an
+    // upstream call, and advance the fallback index (never retry same model).
+    const slashIdx = typeof modelStr === "string" ? modelStr.indexOf("/") : -1;
+    const modelProvider = slashIdx > 0 ? modelStr.slice(0, slashIdx).toLowerCase() : "";
+    const blockEntry = modelProvider ? isProviderBlocked(modelProvider) : null;
+    if (blockEntry) {
+      const next = i + 1 < rotatedModels.length ? rotatedModels[i + 1] : "none";
+      lastError = `provider ${modelProvider} blocked (${blockEntry.reason || "rate limit"})`;
+      if (!lastStatus) lastStatus = 429;
+      log.warn("COMBO", `Model ${modelStr} skipped (provider blocked: ${blockEntry.reason || "rate limit"}) → next ${i + 2}/${rotatedModels.length}: ${next}`);
+      continue;
+    }
     log.info("COMBO", `Trying model ${i + 1}/${rotatedModels.length}: ${modelStr}`);
 
     try {
@@ -351,7 +364,13 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       // Fallback to next model
       lastError = errorText || String(result.status);
       if (!lastStatus) lastStatus = result.status;
-      log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
+      const nextModel = i + 1 < rotatedModels.length ? rotatedModels[i + 1] : "none";
+      const fallbackReason = /preflight_context_too_large/.test(lastError)
+        ? "preflight_context_too_large"
+        : /rate_limit_exceeded|tokens per minute|\btpm\b|request too large|too many tokens/i.test(lastError) || result.status === 413 || result.status === 429
+          ? "groq_tpm_limit"
+          : "upstream_error";
+      log.warn("COMBO", `Model ${modelStr} failed (fallback_reason: ${fallbackReason}), trying next ${i + 2}/${rotatedModels.length}: ${nextModel}`, { status: result.status });
     } catch (error) {
       // Catch unexpected exceptions to ensure fallback continues
       lastError = error.message || String(error);

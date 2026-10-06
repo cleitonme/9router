@@ -32,6 +32,15 @@ import { stripUnsupportedModalities } from "../translator/concerns/modality.js";
 import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
 import { defaultClaudeToolType, shouldDefaultClaudeToolType } from "../translator/concerns/toolCall.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
+import {
+  GROQ_SAFE_BUDGET,
+  GROQ_BLOCK_TTL_MS,
+  blockGroq,
+  compactForGroq,
+  estimateRequestTokens,
+  isGroqTpmError,
+  parseGroqResetsAtMs,
+} from "../services/groqPreflight.js";
 
 /**
  * Core chat handler - shared between SSE and Worker
@@ -318,6 +327,41 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // system/tools/messages, and a stale anchor costs a full prefix rewrite.
   if (passthrough && clientTool === "claude") anchorClaudeCache(translatedBody);
 
+  // Groq TPM preflight: estimate context (system + history + tools + max
+  // output) against the safe 6500-token budget and compact before sending.
+  // Fail-open: any estimator/compactor error leaves the body untouched.
+  if (String(provider || "").toLowerCase() === "groq") {
+    try {
+      const estimatedBefore = estimateRequestTokens(translatedBody);
+      if (estimatedBefore > GROQ_SAFE_BUDGET) {
+        const compacted = compactForGroq(translatedBody, GROQ_SAFE_BUDGET);
+        if (compacted?.body) translatedBody = compacted.body;
+        const estimatedAfter = compacted?.estimatedAfter ?? estimateRequestTokens(translatedBody);
+        log?.warn?.(
+          "PREFLIGHT",
+          `groq/${model} estimatedBefore=${estimatedBefore} budget=${GROQ_SAFE_BUDGET} ` +
+          `estimatedAfter=${estimatedAfter} removedMessages=${compacted?.removedMessages ?? 0} ` +
+          `removedToolBytes=${compacted?.removedToolBytes ?? 0}`
+        );
+        if (estimatedAfter > GROQ_SAFE_BUDGET) {
+          // Don't send: mark skipped so combo/account fallback advances.
+          // The 413 status reuses the TPM fallback path (no same-model retry).
+          const msg =
+            `[preflight_context_too_large] groq/${model} context ~${estimatedAfter} tokens ` +
+            `exceeds safe budget ${GROQ_SAFE_BUDGET} (after compaction: ` +
+            `removed ${compacted?.removedMessages ?? 0} msgs, ` +
+            `${compacted?.removedToolBytes ?? 0} tool bytes)`;
+          log?.warn?.("PREFLIGHT", `${msg} → skipping groq for this request`);
+          return createErrorResult(413, msg);
+        }
+      } else if (estimatedBefore > 0) {
+        log?.debug?.("PREFLIGHT", `groq/${model} estimated=${estimatedBefore} budget=${GROQ_SAFE_BUDGET} ok`);
+      }
+    } catch (e) {
+      log?.debug?.("PREFLIGHT", `groq preflight fail-open: ${e?.message || e}`);
+    }
+  }
+
   const executor = getExecutor(provider);
   trackPendingRequest(model, provider, connectionId, true);
   appendRequestLog({ model, provider, connectionId, status: "PENDING" }).catch(() => { });
@@ -472,6 +516,25 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (!providerResponse.ok) {
     trackPendingRequest(model, provider, connectionId, false, true);
     const { statusCode, message, resetsAtMs } = await parseUpstreamError(providerResponse, executor);
+    // Groq TPM/org limit: block the whole provider (not just this key) so the
+    // router never retries the same model nor another Groq key in this window.
+    // Honor retry-after / x-ratelimit-reset-* when present, else 60s.
+    try {
+      if (isGroqTpmError(statusCode, message, provider)) {
+        const headerMs = parseGroqResetsAtMs(providerResponse?.headers);
+        const ttlMs = (() => {
+          const until = Math.max(resetsAtMs || 0, headerMs || 0);
+          if (until > Date.now()) return Math.min(until - Date.now(), 30 * 60 * 1000);
+          return GROQ_BLOCK_TTL_MS;
+        })();
+        blockGroq(`groq_tpm_limit [${statusCode}]`, ttlMs);
+        log?.warn?.(
+          "FALLBACK",
+          `groq/${model} blocked (fallback_reason: groq_tpm_limit, status=${statusCode}, ` +
+          `cooldown=${Math.round(ttlMs / 1000)}s) → next combo model`
+        );
+      }
+    } catch { /* block must never break error path */ }
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${statusCode}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,

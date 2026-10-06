@@ -25,6 +25,7 @@ import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
+import { blockGroq, isGroqTpmError, parseGroqResetsAtMs, GROQ_BLOCK_TTL_MS } from "open-sse/services/groqPreflight.js";
 
 /**
  * Handle chat completion request
@@ -363,6 +364,21 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     });
 
     if (result.success) return result.response;
+
+    // Groq TPM/org limit: never retry the same model nor another Groq key —
+    // TPM is per-organization. Block the provider and hand the error back to
+    // the combo immediately so it advances 1/8 → 2/8.
+    if (String(provider || "").toLowerCase() === "groq" && isGroqTpmError(result.status, result.error, provider)) {
+      let ttlMs = GROQ_BLOCK_TTL_MS;
+      try {
+        const headerMs = parseGroqResetsAtMs(result.response?.headers);
+        const until = Math.max(result.resetsAtMs || 0, headerMs || 0);
+        if (until > Date.now()) ttlMs = Math.min(until - Date.now(), 30 * 60 * 1000);
+      } catch { /* default TTL */ }
+      blockGroq("groq_tpm_limit", ttlMs);
+      log.warn("FALLBACK", `groq/${model} TPM limit (fallback_reason: groq_tpm_limit, status=${result.status}, cooldown=${Math.round(ttlMs / 1000)}s) → NEXT COMBO MODEL (no same-provider retry)`);
+      return result.response;
+    }
 
     // Antigravity 409/429: refresh live quota to get exact resetAt before locking
     let quotaResetMs = null;

@@ -86,7 +86,68 @@ export async function parseUpstreamError(response, executor = null) {
   const messageStr = typeof message === "string" ? message : JSON.stringify(message);
   const finalMessage = messageStr || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
 
+  // Honor Groq-style rate-limit reset hints (retry-after / x-ratelimit-reset-*)
+  // so callers can block the provider until the window resets.
+  const resetsAtMs = parseResetsAtMsFromHeaders(response?.headers);
+  if (resetsAtMs) return { statusCode: response.status, message: finalMessage, resetsAtMs };
   return { statusCode: response.status, message: finalMessage };
+}
+
+/**
+ * Extract a cooldown expiry (epoch ms) from upstream rate-limit headers.
+ * Supports `retry-after` (seconds / HTTP date), Groq `x-ratelimit-reset-*`
+ * (delta seconds, epoch seconds, Go durations, HTTP dates). Null when absent.
+ */
+export function parseResetsAtMsFromHeaders(headers) {
+  try {
+    if (!headers) return null;
+    const get = (name) => {
+      try {
+        if (typeof headers.get === "function") {
+          const v = headers.get(name);
+          if (v != null && v !== "") return String(v);
+        }
+      } catch { /* ignore */ }
+      if (typeof headers === "object") {
+        for (const k of [name, name.toLowerCase()]) {
+          if (headers[k] != null && headers[k] !== "") return String(headers[k]);
+        }
+      }
+      return null;
+    };
+    const retryAfter = get("retry-after");
+    if (retryAfter) {
+      const secs = Number.parseFloat(retryAfter);
+      if (Number.isFinite(secs) && secs >= 0) return Date.now() + Math.ceil(secs * 1000);
+      const asDate = Date.parse(retryAfter);
+      if (Number.isFinite(asDate) && asDate > Date.now()) return asDate;
+    }
+    for (const name of ["x-ratelimit-reset-tokens", "x-ratelimit-reset-requests", "x-ratelimit-reset", "ratelimit-reset"]) {
+      const raw = get(name);
+      if (!raw) continue;
+      const asNum = Number.parseFloat(raw);
+      if (Number.isFinite(asNum) && asNum > 0) {
+        if (asNum > 1e9) {
+          const ms = asNum * 1000;
+          if (ms > Date.now()) return ms;
+        } else {
+          return Date.now() + Math.ceil(asNum * 1000);
+        }
+      }
+      const asDate = Date.parse(raw);
+      if (Number.isFinite(asDate) && asDate > Date.now()) return asDate;
+      const goMatch = String(raw).match(/(\d+(?:\.\d+)?)(h|m(?!s)|s|ms)/);
+      if (goMatch) {
+        const val = Number.parseFloat(goMatch[1]);
+        const unit = goMatch[2];
+        const mult = unit === "h" ? 3600e3 : unit === "m" ? 60e3 : unit === "s" ? 1e3 : 1;
+        if (Number.isFinite(val)) return Date.now() + Math.ceil(val * mult);
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
