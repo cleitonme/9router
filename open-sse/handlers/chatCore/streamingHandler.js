@@ -45,7 +45,12 @@ function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent,
 /**
  * Handle streaming response — pipe provider SSE through transform stream to client.
  */
-export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials }) {
+export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials, requestId }) {
+  // Idempotency guard: once this function pipes the first byte, the caller
+  // must NEVER auto-retry/fallback (would duplicate tokens or tool calls).
+  // All fallback decisions happen pre-body in chatCore/chat.js. request_id
+  // correlates the stream with its [AUTH]/[QUOTA]/[UPSTREAM] lines.
+  const reqId = requestId || clientRawRequest?.requestId || null;
   if (onRequestSuccess) {
     Promise.resolve()
       .then(onRequestSuccess)

@@ -280,6 +280,9 @@ export async function checkAndRefreshToken(provider, credentials, options = {}) 
         providerSpecificData: newCreds.providerSpecificData
           ? { ...creds.providerSpecificData, ...newCreds.providerSpecificData }
           : creds.providerSpecificData,
+        // Marker so the reactive 401 path in chatCore skips a duplicate
+        // refresh when we just refreshed proactively (single-refresh policy).
+        _proactiveRefreshAt: Date.now(),
       };
 
       // Non-blocking: refresh projectId with the new access token

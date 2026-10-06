@@ -69,9 +69,12 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides, requestId }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
+  // Unique request id: never auto-retry after the first response token.
+  // Propagated from handleChat via clientRawRequest.requestId (fail-open).
+  const reqId = requestId || clientRawRequest?.requestId || null;
   // Stable per-session color so all lines of one CLI conversation share a tag
   const sessionSeed = (() => {
     try {
@@ -464,13 +467,18 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, errMsg);
   }
 
-  // Handle 401/403 - try token refresh (skip for noAuth providers)
-  if (!executor.noAuth && (providerResponse.status === HTTP_STATUS.UNAUTHORIZED || providerResponse.status === HTTP_STATUS.FORBIDDEN)) {
+  // Handle 401/403 - try token refresh ONCE (skip for noAuth providers).
+  // Policy: max 1 refresh attempt total. A failed refresh means
+  // invalid_credentials (accountLock 30min in auth.js), never 3 extra
+  // retries of the same key. Skip when the proactive path just refreshed
+  // (<60s) to avoid a duplicate refresh of the same account.
+  const justRefreshedAt = credentials?._proactiveRefreshAt || 0;
+  const skipReactiveRefresh = Date.now() - justRefreshedAt < 60 * 1000;
+  if (skipReactiveRefresh && (providerResponse.status === HTTP_STATUS.UNAUTHORIZED || providerResponse.status === HTTP_STATUS.FORBIDDEN)) {
+    log?.warn?.("TOKEN", `${provider.toUpperCase()} | skip reactive refresh (proactive refresh ${Math.round((Date.now() - justRefreshedAt) / 1000)}s ago) request_id=${reqId}`);
+  }
+  if (!skipReactiveRefresh && !executor.noAuth && (providerResponse.status === HTTP_STATUS.UNAUTHORIZED || providerResponse.status === HTTP_STATUS.FORBIDDEN)) {
     try {
-      // Mutate credentials after each successful refresh: rotating refresh_token
-      // providers (xAI/grok-cli) issue a new RT on every refresh; without this,
-      // refreshWithRetry's 2nd/3rd attempt reuses the already-consumed RT →
-      // invalid_grant → auth_failed retryable=false.
       const newCredentials = await refreshWithRetry(async () => {
         const result = await executor.refreshCredentials(credentials, log);
         if (result?.refreshToken && result.refreshToken !== credentials.refreshToken) {
@@ -478,7 +486,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
           credentials.refreshToken = result.refreshToken;
         }
         return result;
-      }, 3, log);
+      }, 1, log);
       if (newCredentials?.accessToken || newCredentials?.copilotToken) {
         if (log?.line) log.line(reqTag, "🔑", `TOKEN REFRESHED · ${provider}/${model}`);
         Object.assign(credentials, newCredentials);
@@ -515,7 +523,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Provider returned error
   if (!providerResponse.ok) {
     trackPendingRequest(model, provider, connectionId, false, true);
-    const { statusCode, message, resetsAtMs } = await parseUpstreamError(providerResponse, executor);
+    const { statusCode, message, resetsAtMs, bodyText, bodyJson } = await parseUpstreamError(providerResponse, executor);
+    // Canonical classification attached to the error result so the
+    // account/combo fallback can pick the right lock scope (account/model/provider).
+    let classification = null;
+    try {
+      const { classifyError } = await import("../utils/classifyError.js");
+      classification = classifyError({ status: statusCode, bodyText: bodyText || message, bodyJson, headers: providerResponse?.headers });
+    } catch { classification = null; }
     // Groq TPM/org limit: block the whole provider (not just this key) so the
     // router never retries the same model nor another Groq key in this window.
     // Honor retry-after / x-ratelimit-reset-* when present, else 60s.
@@ -553,10 +568,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       log.errorLine(reqTag, "✗", `ERROR ${statusCode} · ${provider}/${model} · ${Date.now() - requestStartTime}ms${urlStr}\n    ${errMsg}`);
     }
     reqLogger.logError(new Error(message), finalBody || translatedBody);
-    return createErrorResult(statusCode, errMsg, resetsAtMs, upstreamResponseHeaders(providerResponse.headers));
+    return createErrorResult(statusCode, errMsg, resetsAtMs, upstreamResponseHeaders(providerResponse.headers), { bodyJson, classification });
   }
 
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };
+  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log, requestId: reqId };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => trackPendingRequest(model, provider, connectionId, false);
 

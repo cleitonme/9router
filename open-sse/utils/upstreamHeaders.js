@@ -1,5 +1,9 @@
 const FORWARDED = new Set([
   "retry-after",
+  "x-ratelimit-reset",
+  "x-ratelimit-reset-after",
+  "x-ratelimit-reset-tokens",
+  "x-ratelimit-reset-requests",
   "x-should-retry",
   // Groq rate-limit hints (TPM/RPM resets). Forwarded so combo/account
   // fallback can honor retry-after / reset instead of retrying blindly.

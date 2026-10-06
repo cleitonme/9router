@@ -1,4 +1,5 @@
-import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS } from "../config/errorConfig.js";
+import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS, ACCOUNT_INVALID_COOLDOWN_MS, QUOTA_EXHAUSTED_DEFAULT_MS } from "../config/errorConfig.js";
+import { classifyError } from "../utils/classifyError.js";
 
 /**
  * Calculate exponential backoff cooldown for rate limits (429)
@@ -20,7 +21,41 @@ export function getQuotaCooldown(backoffLevel = 0) {
  * @param {number} backoffLevel - Current backoff level for exponential backoff
  * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number }}
  */
-export function checkFallbackError(status, errorText, backoffLevel = 0, provider = null) {
+export function checkFallbackError(status, errorText, backoffLevel = 0, provider = null, extra = {}) {
+  // Canonical classification first: auth/quota/upstream get precise
+  // cooldowns + scopes. Falls back to legacy ERROR_RULES for anything
+  // the classifier marks unknown/invalid_request.
+  try {
+    const bodyJson = extra?.bodyJson ?? null;
+    const headers = extra?.headers ?? null;
+    const text = typeof errorText === "string" ? errorText : (errorText ? JSON.stringify(errorText) : "");
+    const c = classifyError({ status, bodyText: text, bodyJson, headers });
+    if (c && c.type && c.type !== "unknown") {
+      if (c.type === "invalid_credentials") {
+        return { shouldFallback: true, cooldownMs: ACCOUNT_INVALID_COOLDOWN_MS, classification: c };
+      }
+      if (c.type === "quota_exhausted") {
+        const precise = extra?.retryAfterMs && extra.retryAfterMs > Date.now()
+          ? extra.retryAfterMs - Date.now()
+          : (c.retryAfterMs && c.retryAfterMs > Date.now() ? c.retryAfterMs - Date.now() : QUOTA_EXHAUSTED_DEFAULT_MS);
+        return { shouldFallback: true, cooldownMs: precise, classification: c };
+      }
+      if (c.type === "upstream_overload" || c.type === "upstream_rate_limit" || c.type === "concurrency_limit" || c.type === "gateway_rate_limit" || c.type === "timeout" || c.type === "server_error") {
+        // Short DB cooldown only; the RAM providerLock carries the real grouping.
+        // Honor Retry-After when present but cap it so overload never parks an account for hours.
+        const raMs = extra?.retryAfterMs && extra.retryAfterMs > Date.now()
+          ? extra.retryAfterMs - Date.now()
+          : (c.retryAfterMs && c.retryAfterMs > Date.now() ? c.retryAfterMs - Date.now() : TRANSIENT_COOLDOWN_MS);
+        const capped = Math.min(raMs, TRANSIENT_COOLDOWN_MS);
+        return { shouldFallback: true, cooldownMs: Math.max(capped, 1000), classification: c };
+      }
+      // invalid_request/unknown fall through to legacy ERROR_RULES below:
+      // bare 402/404 and other account-scoped statuses must still fall back
+      // (next account/model). Only request-scoped 400s with no quota wording
+      // end up no-fallback.
+    }
+  } catch { /* fall through to legacy rules */ }
+
   const lowerError = errorText
     ? (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase()
     : "";

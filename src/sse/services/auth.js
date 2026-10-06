@@ -1,7 +1,8 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
-import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
+import { MAX_RATE_LIMIT_COOLDOWN_MS, ACCOUNT_INVALID_COOLDOWN_MS, QUOTA_EXHAUSTED_DEFAULT_MS } from "open-sse/config/errorConfig.js";
+import { classifyError } from "open-sse/utils/classifyError.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { getAntigravityQuotaCache } from "./antigravityQuota.js";
 import * as log from "../utils/logger.js";
@@ -230,16 +231,19 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 }
 
 /**
- * Mark account+model as unavailable — locks modelLock_${model} in DB.
- * All errors (429, 401, 5xx, etc.) lock per model, not per account.
+ * Mark account/model/provider as unavailable with scoped locks.
+ * - invalid_credentials (401) → accountLock (modelLock___all) 30min, this account only.
+ * - quota_exhausted (daily) → modelLock_${model} until reset or 6h.
+ * - upstream_overload/rate_limit/concurrency/gateway → short modelLock (Retry-After capped)
+ *   + RAM providerLock grouped by upstream (set by caller in chat.js).
  * @param {string} connectionId
  * @param {number} status - HTTP status code from upstream
  * @param {string} errorText
  * @param {string|null} provider
  * @param {string|null} model - The specific model that triggered the error
- * @returns {{ shouldFallback: boolean, cooldownMs: number }}
+ * @returns {{ shouldFallback: boolean, cooldownMs: number, classification?: object }}
  */
-export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null) {
+export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null, extra = {}) {
   if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
   const connections = await getProviderConnections({ provider });
   const conn = connections.find(c => c.id === connectionId);
@@ -248,26 +252,64 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   // GitHub premium-request exhaustion is account-wide until the next UTC month.
   const githubResetAtMs = githubMonthlyResetMs(status, errorText, provider);
 
+  // Canonical classification drives lock scope + duration.
+  let classification = null;
+  try {
+    classification = classifyError({
+      status,
+      bodyText: typeof errorText === "string" ? errorText : JSON.stringify(errorText || ""),
+      bodyJson: extra?.bodyJson ?? null,
+      headers: extra?.headers ?? null,
+    });
+  } catch { classification = null; }
+
   // Provider-specific precise cooldown (e.g. codex usage_limit_reached resets_at) overrides backoff
   let shouldFallback, cooldownMs, newBackoffLevel;
+  let lockModel = model; // null = account-level lock
   if (githubResetAtMs) {
     shouldFallback = true;
     cooldownMs = githubResetAtMs - Date.now();
     newBackoffLevel = 0;
+    lockModel = null;
+  } else if (classification?.type === "invalid_credentials") {
+    // 401 invalid/disabled key: lock ONLY this account (account-level), 30min.
+    // No backoff escalation, no per-model spillover to healthy accounts.
+    shouldFallback = true;
+    cooldownMs = ACCOUNT_INVALID_COOLDOWN_MS;
+    newBackoffLevel = 0;
+    lockModel = null;
+  } else if (classification?.type === "quota_exhausted") {
+    // Daily/free quota: per-model lock until reset. Never truncate quota resets.
+    shouldFallback = true;
+    const precise = resetsAtMs && resetsAtMs > Date.now() ? resetsAtMs - Date.now()
+      : (classification?.retryAfterMs && classification.retryAfterMs > Date.now() ? classification.retryAfterMs - Date.now() : QUOTA_EXHAUSTED_DEFAULT_MS);
+    cooldownMs = precise;
+    newBackoffLevel = 0;
+    lockModel = model;
   } else if (resetsAtMs && resetsAtMs > Date.now()) {
     shouldFallback = true;
     // Antigravity quota API provides exact per-model resetAt. Do not truncate it.
-    cooldownMs = resolveProviderId(provider) === "antigravity"
+    // Daily quota (classified above) also bypasses the 30min cap.
+    const isQuota = classification?.type === "quota_exhausted";
+    cooldownMs = (resolveProviderId(provider) === "antigravity" || isQuota)
       ? resetsAtMs - Date.now()
       : Math.min(resetsAtMs - Date.now(), MAX_RATE_LIMIT_COOLDOWN_MS);
     newBackoffLevel = 0;
   } else {
-    ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel, resolveProviderId(provider)));
+    ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(
+      status, errorText, backoffLevel, resolveProviderId(provider),
+      { ...extra, retryAfterMs: resetsAtMs, classification }
+    ));
+    if (classification) {
+      // checkFallbackError already honored classification; ensure scope mapping.
+      if (classification.type === "invalid_credentials") lockModel = null;
+      else lockModel = model;
+    }
   }
-  if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
+  if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0, classification };
 
   const reason = typeof errorText === "string" ? errorText.slice(0, 200) : "Provider error";
-  const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs);
+  const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : lockModel, cooldownMs);
 
   await updateProviderConnection(connectionId, {
     ...lockUpdate,
@@ -280,13 +322,15 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
 
   const lockKey = Object.keys(lockUpdate)[0];
   const connName = conn?.displayName || conn?.name || conn?.email || connectionId.slice(0, 8);
-  log.warn("AUTH", `${connName} locked ${lockKey} for ${Math.round(cooldownMs / 1000)}s [${status}]`);
+  const scope = lockModel == null ? "accountLock" : "modelLock";
+  const ctype = classification?.type || "unclassified";
+  log.warn("AUTH", `${connName} ${scope} ${lockKey} reason=${ctype} for ${Math.round(cooldownMs / 1000)}s [${status}]`);
 
   if (provider && status && reason) {
     console.error(`❌ ${provider} [${status}]: ${reason}`);
   }
 
-  return { shouldFallback: true, cooldownMs };
+  return { shouldFallback: true, cooldownMs, classification };
 }
 
 /**

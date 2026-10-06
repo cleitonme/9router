@@ -39,7 +39,15 @@ export const BACKOFF_CONFIG = {
 export const TRANSIENT_COOLDOWN_MS = 30 * 1000;
 
 // Hard cap for provider-reported rate limit cooldown (e.g. codex resets_at can be 5-6h)
+// NOTE: daily/free quota (quota_exhausted) intentionally bypasses this cap and
+// uses Retry-After/X-RateLimit-Reset or QUOTA_EXHAUSTED_DEFAULT_MS (6h).
 export const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
+
+// Canonical fallback policy (single source of truth, see utils/classifyError.js)
+export const ACCOUNT_INVALID_COOLDOWN_MS = 30 * 60 * 1000; // 401 invalid/disabled key → account lock
+export const QUOTA_EXHAUSTED_DEFAULT_MS = 6 * 60 * 60 * 1000; // daily quota w/o reset header → 6h
+export const UPSTREAM_BACKOFF_MIN_MS = 1000;
+export const UPSTREAM_BACKOFF_MAX_MS = 5000;
 
 // Cooldown durations (ms)
 const COOLDOWN = {
@@ -73,6 +81,21 @@ export const ERROR_RULES = [
   { text: "rate limit",               backoff: true },
   { text: "too many requests",        backoff: true },
   { text: "quota exceeded",           backoff: true },
+  { text: "daily limit",              backoff: true },
+  { text: "free model daily limit",   backoff: true },
+  { text: "top up credits",           backoff: true },
+  { text: "top-up credits",           backoff: true },
+  { text: "free version",             backoff: true },
+  { text: "usage_limit_reached",      backoff: true },
+  { text: "server overload",          backoff: true },
+  { text: "temporarily rate-limited upstream", backoff: true },
+  { text: "request limited concurrency reached", backoff: true },
+  { text: "provider returned error",  backoff: true },
+  { text: "limit_source",             backoff: true },
+  { text: "provider_name",            backoff: true },
+  { text: "remedy_hint",              backoff: true },
+  { text: "invalid or disabled api key", cooldownMs: ACCOUNT_INVALID_COOLDOWN_MS },
+  { text: "invalid api key",          cooldownMs: ACCOUNT_INVALID_COOLDOWN_MS },
   { text: "capacity",                 backoff: true },
   { text: "overloaded",               backoff: true },
 

@@ -70,14 +70,18 @@ export async function parseUpstreamError(response, executor = null) {
       const parsed = executor.parseError(response, bodyText);
       if (parsed && typeof parsed === "object") {
         const msg = parsed.message || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
-        return { statusCode: parsed.status || response.status, message: msg, resetsAtMs: parsed.resetsAtMs };
+        let bodyJson = null;
+        try { bodyJson = JSON.parse(bodyText); } catch { bodyJson = null; }
+        return { statusCode: parsed.status || response.status, message: msg, resetsAtMs: parsed.resetsAtMs, bodyText, bodyJson };
       }
     } catch { /* fall through to default parsing */ }
   }
 
   let message = "";
+  let bodyJson = null;
   try {
     const json = JSON.parse(bodyText);
+    bodyJson = json;
     message = json.error?.message || json.message || json.error || bodyText;
   } catch {
     message = bodyText;
@@ -89,8 +93,8 @@ export async function parseUpstreamError(response, executor = null) {
   // Honor Groq-style rate-limit reset hints (retry-after / x-ratelimit-reset-*)
   // so callers can block the provider until the window resets.
   const resetsAtMs = parseResetsAtMsFromHeaders(response?.headers);
-  if (resetsAtMs) return { statusCode: response.status, message: finalMessage, resetsAtMs };
-  return { statusCode: response.status, message: finalMessage };
+  if (resetsAtMs) return { statusCode: response.status, message: finalMessage, resetsAtMs, bodyText, bodyJson };
+  return { statusCode: response.status, message: finalMessage, bodyText, bodyJson };
 }
 
 /**
@@ -157,12 +161,14 @@ export function parseResetsAtMsFromHeaders(headers) {
  * @param {number} [resetsAtMs] - Optional precise cooldown expiry (ms epoch) for provider-specific quota errors
  * @returns {{ success: false, status: number, error: string, response: Response, resetsAtMs?: number }}
  */
-export function createErrorResult(statusCode, message, resetsAtMs, extraHeaders = null) {
+export function createErrorResult(statusCode, message, resetsAtMs, extraHeaders = null, extra = {}) {
   return {
     success: false,
     status: statusCode,
     error: message,
     resetsAtMs,
+    bodyJson: extra?.bodyJson ?? null,
+    classification: extra?.classification ?? null,
     response: errorResponse(statusCode, message, extraHeaders)
   };
 }

@@ -74,12 +74,13 @@ export const RETRY_CONFIG = {
 };
 
 // Default retry config by status code: { attempts, delayMs }
-// Backward compat: if value is a number, treated as attempts with RETRY_CONFIG.delayMs
+// Single-retry policy: account/combo fallback owns retries. Internal HTTP
+// retries must never cause 3+ identical upstream calls (see fallback policy).
 export const DEFAULT_RETRY_CONFIG = {
   429: { attempts: 0, delayMs: 0 },
-  502: { attempts: 3, delayMs: 3000 },
-  503: { attempts: 3, delayMs: 2000 },
-  504: { attempts: 2, delayMs: 3000 }
+  502: { attempts: 1, delayMs: 2000 },
+  503: { attempts: 1, delayMs: 2000 },
+  504: { attempts: 1, delayMs: 3000 }
 };
 
 // Normalize a retry entry to { attempts, delayMs }

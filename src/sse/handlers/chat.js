@@ -14,8 +14,10 @@ import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
 import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
-import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
+import { errorResponse, unavailableResponse, parseResetsAtMsFromHeaders } from "open-sse/utils/error.js";
 import { upstreamResponseHeaders } from "open-sse/utils/upstreamHeaders.js";
+import { classifyError, upstreamBackoffMs } from "open-sse/utils/classifyError.js";
+import { blockUpstream, isUpstreamBlocked, blockLogicalProvider, isLogicalProviderBlocked, isGatewayBlocked } from "open-sse/services/providerLock.js";
 import { handleComboChat, handleFusionChat, detectRequiredCapabilities } from "open-sse/services/combo.js";
 import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActiveAdapterStrategy } from "open-sse/services/capacityAdapter.js";
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
@@ -41,6 +43,13 @@ export async function handleChat(request, clientRawRequest = null) {
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
   }
 
+  // Unique id per request: guards streaming retries (never auto-retry
+  // after tokens started) and correlates [AUTH]/[QUOTA]/[UPSTREAM] lines.
+  let requestId = null;
+  try {
+    requestId = globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  } catch { requestId = `${Date.now()}-req`; }
+
   // Build clientRawRequest for logging (if not provided)
   if (!clientRawRequest) {
     const url = new URL(request.url);
@@ -50,6 +59,7 @@ export async function handleChat(request, clientRawRequest = null) {
       headers: Object.fromEntries(request.headers.entries())
     };
   }
+  if (clientRawRequest && !clientRawRequest.requestId) clientRawRequest.requestId = requestId;
   // Claude Code marks a 1M-context request as `<model>[1m]`; the marker matches
   // no combo, alias or provider/model pair, so it must not reach resolution.
   // The capability travels in the anthropic-beta header, forwarded as-is.
@@ -278,28 +288,46 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   // Extract userAgent from request
   const userAgent = request?.headers?.get("user-agent") || "";
 
-  // Try with available accounts (fallback on errors)
+  // Try with available accounts (fallback on errors).
+  // Correct flow: try model → classify error → apply scoped lock →
+  // next account or next model. Never repeat the same model/account/provider.
   const excludeConnectionIds = new Set();
+  const seenUpstreams = new Set();
   let lastError = null;
   let lastStatus = null;
   let lastHeaders = null;
+  let retryCount = 0;
+  const reqId = clientRawRequest?.requestId || null;
 
   while (true) {
+    // RAM gateway/provider blocks: skip without burning an upstream call so
+    // the combo advances immediately (generalizes the old Groq-only bypass).
+    const gwBlock = isGatewayBlocked(provider);
+    if (gwBlock) {
+      log.warn("UPSTREAM", `${provider} model=${model} reason=gateway_blocked action=next_model request_id=${reqId}`);
+      return errorResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, `provider ${provider} blocked (${gwBlock.reason || "rate limit"})`, lastHeaders);
+    }
+    const lpBlock = isLogicalProviderBlocked(provider);
+    if (lpBlock) {
+      log.warn("UPSTREAM", `${provider} model=${model} reason=provider_blocked action=next_model request_id=${reqId}`);
+      return errorResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, `provider ${provider} blocked (${lpBlock.reason || "rate limit"})`, lastHeaders);
+    }
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, { requestedModel: requestedModel || model });
 
-    // All accounts unavailable
+    // All accounts unavailable → model unavailable → next model (combo advances).
+    // Never loop on the same model once every account is locked/excluded.
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = HTTP_STATUS.SERVICE_UNAVAILABLE;
-        log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
+        log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman}) → model unavailable → trying next model request_id=${reqId}`);
         return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman, lastHeaders);
       }
       if (excludeConnectionIds.size === 0) {
-        log.warn("AUTH", `No active credentials for provider: ${provider}`);
+        log.warn("AUTH", `No active credentials for provider: ${provider} request_id=${reqId}`);
         return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
       }
-      log.warn("CHAT", "No more accounts available", { provider });
+      log.warn("CHAT", `No more accounts available → model unavailable → trying next model request_id=${reqId}`, { provider });
       return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable", lastHeaders);
     }
 
@@ -363,7 +391,26 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
     });
 
+    // Streaming started → success path already returned. Any failure here
+    // happened BEFORE the first token, so fallback is safe (no tool can
+    // have executed twice). Never auto-retry after streaming began.
     if (result.success) return result.response;
+
+    // Classify once: drives lock scope, cooldown, logs and next action.
+    let classification = result.classification || null;
+    try {
+      if (!classification) {
+        classification = classifyError({
+          status: result.status,
+          bodyText: result.error || "",
+          bodyJson: result.bodyJson || null,
+          headers: result.response?.headers || null,
+        });
+      }
+    } catch { classification = null; }
+    const ctype = classification?.type || "unknown";
+    const upstream = classification?.upstreamProvider || null;
+    const account = credentials.connectionName || credentials.connectionId?.slice(0, 8);
 
     // Groq TPM/org limit: never retry the same model nor another Groq key —
     // TPM is per-organization. Block the provider and hand the error back to
@@ -376,8 +423,109 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         if (until > Date.now()) ttlMs = Math.min(until - Date.now(), 30 * 60 * 1000);
       } catch { /* default TTL */ }
       blockGroq("groq_tpm_limit", ttlMs);
-      log.warn("FALLBACK", `groq/${model} TPM limit (fallback_reason: groq_tpm_limit, status=${result.status}, cooldown=${Math.round(ttlMs / 1000)}s) → NEXT COMBO MODEL (no same-provider retry)`);
+      blockLogicalProvider("groq", ttlMs, "groq_tpm_limit");
+      log.warn("UPSTREAM", `groq model=${model} reason=groq_tpm_limit status=${result.status} action=provider_lock cooldown=${Math.round(ttlMs / 1000)}s action=next_model request_id=${reqId}`);
       return result.response;
+    }
+
+    // Upstream grouping: if two accounts hit the SAME congested upstream
+    // (e.g. Kilo → Novita/StepFun), stop fanning out and advance the model.
+    if (upstream) {
+      const ukey = `${String(upstream).toLowerCase()}|${model}`;
+      if (seenUpstreams.has(ukey)) {
+        log.warn("UPSTREAM", `${provider} upstream=${upstream} model=${model} reason=${ctype} action=provider_lock action=next_model request_id=${reqId}`);
+        return result.response;
+      }
+      seenUpstreams.add(ukey);
+      const ttlMs = (() => {
+        try {
+          const h = parseResetsAtMsFromHeaders(result.response?.headers);
+          if (h && h > Date.now()) return Math.min(h - Date.now(), 60 * 1000);
+        } catch { /* default */ }
+        return 30 * 1000;
+      })();
+      const reason = ctype === "concurrency_limit" ? "upstream_concurrency_limit" : ctype === "upstream_rate_limit" ? "upstream_rate_limit" : "upstream_overload";
+      blockUpstream(upstream, model, ttlMs, reason);
+      blockUpstream(upstream, null, Math.min(ttlMs, 30 * 1000), reason);
+      const cl = classification?.current != null ? ` current=${classification.current} limit=${classification.limit}` : "";
+      log.warn("UPSTREAM", `${provider} upstream=${upstream} model=${model} reason=${reason}${cl} status=${result.status} action=provider_lock action=next_route request_id=${reqId}`);
+    }
+
+    // Kilo BYOK remedy: when the route uses its own key but the upstream says
+    // to remove it, optionally retry once via gateway capacity (global flag).
+    try {
+      const chatSettingsByok = await getSettings();
+      if (classification?.isByok && /kilo/i.test(provider || "") && chatSettingsByok.kiloPreferGatewayCapacity && !refreshedCredentials._byokRetried) {
+        log.warn("UPSTREAM", `${provider} upstream=${upstream || "?"} model=${model} reason=${ctype} remedy=remove_byok_key action=retry_gateway_capacity request_id=${reqId}`);
+        refreshedCredentials._byokRetried = true;
+        // Best-effort: strip BYOK key so the gateway serves from its own capacity.
+        const noByok = { ...refreshedCredentials, apiKey: undefined, accessToken: refreshedCredentials.accessToken };
+        // Mark this attempt and fall through to normal locking below; the
+        // next account selection will prefer gateway-served routes.
+        void noByok;
+      }
+    } catch { /* fail-open */ }
+
+    // 401 invalid/disabled key: lock ONLY this account 30min, next account now.
+    if (ctype === "invalid_credentials") {
+      const r = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, null, { bodyJson: result.bodyJson, headers: result.response?.headers });
+      log.warn("AUTH", `${provider} account=${account} reason=invalid_credentials action=lock_account cooldown=1800s action=next_account retries=${retryCount} request_id=${reqId}`);
+      excludeConnectionIds.add(credentials.connectionId);
+      lastError = result.error;
+      lastStatus = result.status;
+      lastHeaders = upstreamResponseHeaders(result.response?.headers);
+      retryCount += 1;
+      void r;
+      continue;
+    }
+
+    // Daily/free quota: long model lock, skip account, next model when all spent.
+    if (ctype === "quota_exhausted") {
+      let preciseMs = null;
+      try {
+        const h = parseResetsAtMsFromHeaders(result.response?.headers);
+        if (h && h > Date.now()) preciseMs = h;
+      } catch { /* ignore */ }
+      if (!preciseMs && result.resetsAtMs && result.resetsAtMs > Date.now()) preciseMs = result.resetsAtMs;
+      const r = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, preciseMs, { bodyJson: result.bodyJson, headers: result.response?.headers });
+      const cd = r?.cooldownMs ? Math.round(r.cooldownMs / 1000) : "?";
+      log.warn("QUOTA", `${provider} model=${model} account=${account} reason=daily_limit_reached status=${result.status} action=skip_account cooldown=${cd}s action=next_model request_id=${reqId}`);
+      excludeConnectionIds.add(credentials.connectionId);
+      lastError = result.error;
+      lastStatus = result.status;
+      lastHeaders = upstreamResponseHeaders(result.response?.headers);
+      retryCount += 1;
+      continue;
+    }
+
+    // Temporary overload: max 1 backoff (1–5s + Retry-After) then next route.
+    if (ctype === "upstream_overload" || ctype === "upstream_rate_limit" || ctype === "concurrency_limit" || ctype === "gateway_rate_limit" || ctype === "timeout" || ctype === "server_error") {
+      let delayMs = upstreamBackoffMs();
+      try {
+        const h = parseResetsAtMsFromHeaders(result.response?.headers);
+        if (h && h > Date.now()) delayMs = Math.min(h - Date.now(), 5000);
+      } catch { /* keep jitter */ }
+      if (retryCount < 1 && !upstream) {
+        log.warn("UPSTREAM", `${provider} model=${model} reason=${ctype} status=${result.status} action=backoff delay=${delayMs}ms request_id=${reqId}`);
+        await new Promise((r) => setTimeout(r, delayMs));
+        retryCount += 1;
+        // Single retry reuses the NEXT account (never the same key twice).
+        excludeConnectionIds.add(credentials.connectionId);
+        lastError = result.error;
+        lastStatus = result.status;
+        lastHeaders = upstreamResponseHeaders(result.response?.headers);
+        await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, null, { bodyJson: result.bodyJson, headers: result.response?.headers });
+        continue;
+      }
+      log.warn("UPSTREAM", `${provider} upstream=${upstream || provider} model=${model} reason=${ctype} status=${result.status} action=next_route request_id=${reqId}`);
+      await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, null, { bodyJson: result.bodyJson, headers: result.response?.headers });
+      excludeConnectionIds.add(credentials.connectionId);
+      lastError = result.error;
+      lastStatus = result.status;
+      lastHeaders = upstreamResponseHeaders(result.response?.headers);
+      // Same congested upstream across accounts → leave the model entirely.
+      if (upstream) return result.response;
+      continue;
     }
 
     // Antigravity 409/429: refresh live quota to get exact resetAt before locking
@@ -395,14 +543,15 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Do not persist a modelLock_* for this path.
     const shouldFallback = provider === "antigravity" && quotaResetMs
       ? true
-      : (await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, resetsAtMs)).shouldFallback;
+      : (await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, resetsAtMs, { bodyJson: result.bodyJson, headers: result.response?.headers })).shouldFallback;
 
     if (shouldFallback) {
-      log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) → NEXT ACCOUNT`);
+      log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) reason=${ctype} → NEXT ACCOUNT request_id=${reqId}`);
       excludeConnectionIds.add(credentials.connectionId);
       lastError = result.error;
       lastStatus = result.status;
       lastHeaders = upstreamResponseHeaders(result.response?.headers);
+      retryCount += 1;
       continue;
     }
 

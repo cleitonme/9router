@@ -64,6 +64,9 @@ const DEFAULT_SETTINGS = {
   pxpipeTimeoutMs: 15000,
   // Per-provider user header overrides applied at dispatch: { [providerId]: { headers: {..} } }
   providerOverrides: {},
+  // Global: when a Kilo BYOK route is concurrency/rate limited upstream and the
+  // remedy hint says to remove the key, retry once via gateway capacity (no BYOK key).
+  kiloPreferGatewayCapacity: false,
 };
 
 async function readRaw() {

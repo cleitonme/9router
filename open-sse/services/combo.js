@@ -4,6 +4,9 @@
 
 import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
 import { isProviderBlocked } from "./groqPreflight.js";
+import { isLogicalProviderBlocked, isUpstreamBlocked, isGatewayBlocked } from "./providerLock.js";
+import { parseResetsAtMsFromHeaders } from "../utils/error.js";
+import { classifyError } from "../utils/classifyError.js";
 import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
@@ -300,11 +303,13 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
 
   for (let i = 0; i < rotatedModels.length; i++) {
     const modelStr = rotatedModels[i];
-    // Org-level TPM block: skip blocked providers without consuming an
-    // upstream call, and advance the fallback index (never retry same model).
+    // Org/upstream/gateway-level blocks: skip without consuming an upstream
+    // call, and advance the fallback index (never retry same model).
     const slashIdx = typeof modelStr === "string" ? modelStr.indexOf("/") : -1;
     const modelProvider = slashIdx > 0 ? modelStr.slice(0, slashIdx).toLowerCase() : "";
-    const blockEntry = modelProvider ? isProviderBlocked(modelProvider) : null;
+    const blockEntry = modelProvider
+      ? (isProviderBlocked(modelProvider) || isLogicalProviderBlocked(modelProvider) || isGatewayBlocked(modelProvider))
+      : null;
     if (blockEntry) {
       const next = i + 1 < rotatedModels.length ? rotatedModels[i + 1] : "none";
       lastError = `provider ${modelProvider} blocked (${blockEntry.reason || "rate limit"})`;
@@ -323,16 +328,28 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         return result;
       }
 
-      // Extract error info from response
+      // Extract error info from response (body + headers).
+      // Headers are authoritative for Retry-After/X-RateLimit-Reset: the
+      // per-model handler returns unavailableResponse with retry-after in the
+      // header, not in the JSON body.
       let errorText = result.statusText || "";
       let retryAfter = null;
+      let errorBodyJson = null;
       try {
         const errorBody = await result.clone().json();
+        errorBodyJson = errorBody;
         errorText = errorBody?.error?.message || errorBody?.error || errorBody?.message || errorText;
         retryAfter = errorBody?.retryAfter || null;
       } catch {
         // Ignore JSON parse errors
       }
+      try {
+        const headerMs = parseResetsAtMsFromHeaders(result.headers);
+        if (headerMs) {
+          const iso = new Date(headerMs).toISOString();
+          if (!retryAfter || new Date(iso) < new Date(retryAfter)) retryAfter = iso;
+        }
+      } catch { /* ignore header parse errors */ }
 
       // Track earliest retryAfter across all combo models
       if (retryAfter && (!earliestRetryAfter || new Date(retryAfter) < new Date(earliestRetryAfter))) {
@@ -344,8 +361,9 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         try { errorText = JSON.stringify(errorText); } catch { errorText = String(errorText); }
       }
 
-      // Check if should fallback to next model
-      const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText);
+      // Check if should fallback to next model (classification-aware:
+      // quota_exhausted skips the model, invalid_credentials advances too).
+      const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText, 0, null, { bodyJson: errorBodyJson, headers: result.headers });
 
       if (!shouldFallback) {
         log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
@@ -361,15 +379,19 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         await new Promise(r => setTimeout(r, cooldownMs));
       }
 
-      // Fallback to next model
+      // Fallback to next model — never repeat the same model in this pass.
       lastError = errorText || String(result.status);
       if (!lastStatus) lastStatus = result.status;
       const nextModel = i + 1 < rotatedModels.length ? rotatedModels[i + 1] : "none";
+      let classifiedType = null;
+      try {
+        classifiedType = classifyError({ status: result.status, bodyText: lastError, bodyJson: errorBodyJson, headers: result.headers })?.type || null;
+      } catch { classifiedType = null; }
       const fallbackReason = /preflight_context_too_large/.test(lastError)
         ? "preflight_context_too_large"
-        : /rate_limit_exceeded|tokens per minute|\btpm\b|request too large|too many tokens/i.test(lastError) || result.status === 413 || result.status === 429
+        : (classifiedType || (/rate_limit_exceeded|tokens per minute|\btpm\b|request too large|too many tokens/i.test(lastError) || result.status === 413 || result.status === 429
           ? "groq_tpm_limit"
-          : "upstream_error";
+          : "upstream_error"));
       log.warn("COMBO", `Model ${modelStr} failed (fallback_reason: ${fallbackReason}), trying next ${i + 2}/${rotatedModels.length}: ${nextModel}`, { status: result.status });
     } catch (error) {
       // Catch unexpected exceptions to ensure fallback continues
