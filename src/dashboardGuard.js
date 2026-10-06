@@ -76,7 +76,10 @@ const PROTECTED_API_PATHS = [
 const LOCAL_ONLY_PATHS = [
   "/api/cli-tools/cowork-settings",
   "/api/cli-tools/antigravity-mitm",
-  "/api/mcp/[plugin]",
+  // MCP plugin bridge (e.g. /api/mcp/filesystem/sse) spawns local stdio
+  // processes — local-only. Native server (/api/mcp/native/*) is excluded
+  // below so it can use API-key auth for remote clients.
+  "/api/mcp/",
   "/api/tunnel/tailscale-install",
   "/api/tunnel/tailscale-enable",
   "/api/tunnel/tailscale-disable",
@@ -211,7 +214,10 @@ export async function proxy(request) {
   const { pathname } = request.nextUrl;
 
   // Local-only gate for spawn-capable / host-secret routes.
-  if (LOCAL_ONLY_PATHS.some((p) => pathname.startsWith(p))) {
+  // Exception: the native MCP server (/api/mcp/native/*) accepts remote API
+  // keys (see branch below), so it must not be caught by the "/api/mcp/" prefix.
+  const isNativeMcp = pathname === "/api/mcp/native" || pathname.startsWith("/api/mcp/native/");
+  if (!isNativeMcp && LOCAL_ONLY_PATHS.some((p) => pathname.startsWith(p))) {
     if (!(await canAccessLocalOnlyRoute(request))) {
       return NextResponse.json({ error: "Local only: CLI token required" }, { status: 403 });
     }
@@ -227,6 +233,17 @@ export async function proxy(request) {
   if (isPublicLlmApi(pathname)) {
     if (await canAccessPublicLlmApi(request)) return NextResponse.next();
     return NextResponse.json({ error: "API key required for remote API access" }, { status: 401 });
+  }
+
+  // MCP native server (/api/mcp/native/*): same API keys as /v1.
+  // Remote MCP clients (e.g. OpenCode) send `Authorization: Bearer <key>` and
+  // have no dashboard JWT cookie, so accept valid API keys here just like the
+  // public LLM API does. CLI token and dashboard session keep working as before.
+  if (pathname === "/api/mcp/native" || pathname.startsWith("/api/mcp/native/")) {
+    if (await hasValidCliToken(request)) return NextResponse.next();
+    if (await hasValidApiKey(request)) return NextResponse.next();
+    if (await isAuthenticated(request)) return NextResponse.next();
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   // Deny-by-default for /api/* — public allow-list bypasses, everything else requires auth.

@@ -216,6 +216,100 @@ describe("dashboard guard public LLM API access", () => {
   });
 });
 
+describe("dashboard guard native MCP access (same API key as /v1)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.NINEROUTER_PEER_TOKEN = PEER_TOKEN;
+    mocks.getSettings.mockResolvedValue({ requireLogin: true });
+    mocks.validateApiKey.mockResolvedValue(false);
+    mocks.getConsistentMachineId.mockResolvedValue("cli-token");
+    mocks.verifyDashboardAuthToken.mockResolvedValue(false);
+  });
+
+  it("rejects remote native MCP SSE without credentials", async () => {
+    const response = await proxy(request("/api/mcp/native/sse", {
+      host: "router.example.com",
+    }));
+
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe("Unauthorized");
+  });
+
+  it("rejects remote native MCP message without credentials", async () => {
+    const response = await proxy(request("/api/mcp/native/message?sessionId=abc", {
+      host: "router.example.com",
+    }));
+
+    expect(response.status).toBe(401);
+  });
+
+  it("allows remote native MCP SSE with valid bearer API key", async () => {
+    mocks.validateApiKey.mockResolvedValue({ valid: true, userId: null });
+
+    const response = await proxy(request("/api/mcp/native/sse", {
+      host: "router.example.com",
+      authorization: "Bearer sk-valid",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+    expect(mocks.validateApiKey).toHaveBeenCalledWith("sk-valid");
+  });
+
+  it("allows remote native MCP SSE with valid x-api-key", async () => {
+    mocks.validateApiKey.mockResolvedValue({ valid: true, userId: null });
+
+    const response = await proxy(request("/api/mcp/native/sse", {
+      host: "router.example.com",
+      "x-api-key": "sk-valid",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+    expect(mocks.validateApiKey).toHaveBeenCalledWith("sk-valid");
+  });
+
+  it("allows remote native MCP message with valid API key", async () => {
+    mocks.validateApiKey.mockResolvedValue({ valid: true, userId: null });
+
+    const response = await proxy(request("/api/mcp/native/message?sessionId=abc", {
+      host: "router.example.com",
+      authorization: "Bearer sk-valid",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+
+  it("rejects remote native MCP SSE with invalid API key", async () => {
+    mocks.validateApiKey.mockResolvedValue(false);
+
+    const response = await proxy(request("/api/mcp/native/sse", {
+      host: "router.example.com",
+      authorization: "Bearer sk-invalid",
+    }));
+
+    expect(response.status).toBe(401);
+  });
+
+  it("allows remote native MCP SSE with CLI token (no API key needed)", async () => {
+    const response = await proxy(request("/api/mcp/native/sse", {
+      host: "router.example.com",
+      "x-9r-cli-token": "cli-token",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+    expect(mocks.validateApiKey).not.toHaveBeenCalled();
+  });
+
+  it("allows native MCP tools with dashboard session when requireLogin=false", async () => {
+    mocks.getSettings.mockResolvedValue({ requireLogin: false });
+
+    const response = await proxy(request("/api/mcp/native/tools", {
+      host: "router.example.com",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+  });
+});
+
 describe("dashboard guard local-only access", () => {
   beforeEach(() => {
     vi.clearAllMocks();

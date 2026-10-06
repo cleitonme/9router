@@ -38,6 +38,11 @@ export default function McpDashboardPage() {
             type: "remote",
             url: sseUrl,
             enabled: true,
+            headers: {
+              // Mesma API key usada no endpoint OpenAI-compatible (/v1).
+              // Crie em Dashboard → API Keys e substitua abaixo.
+              Authorization: "Bearer SUA_API_KEY_DO_9ROUTER",
+            },
           },
         },
       },
