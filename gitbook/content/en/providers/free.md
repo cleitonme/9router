@@ -11,8 +11,11 @@ Free tier providers are your **fallback** when subscription and cheap quota exha
 - 🆓 **iFlow** - 8 models FREE (Kimi K2, Qwen3, GLM 4.7, MiniMax M2...)
 - 🆓 **Qwen** - 3 models FREE (Qwen3 Coder Plus/Flash, Vision)
 - 🆓 **Kiro** - 2 models FREE (Claude Sonnet 4.5, Haiku 4.5)
+- 🆓 **Requesty** - free models via API key (OpenAI-compatible gateway, `rq/`)
 
 **Strategy:** Use as emergency backup. Unlimited usage, zero cost forever!
+
+> **Requesty needs an API key** (unlike the no-auth free providers). Requesty reports ~200 free requests/day on its free plan — that limit is set by the provider and may change; 9Router does not control it. Only models whose published pricing is zero on every tier are shown as free; if Requesty's API stops publishing trustworthy pricing, nothing is guessed as free.
 
 ---
 
@@ -181,6 +184,51 @@ Model: kr/claude-sonnet-4.5
 
 ---
 
+## Requesty (API key, free tier)
+
+### Pricing
+
+| Plan | Monthly Cost | Models | Quota |
+|------|--------------|--------|-------|
+| FREE | $0 | Free-priced models only | ~200 req/day (per provider, subject to change) |
+
+### Setup
+
+**Step 1: Get a Requesty API key**
+
+- Sign up at `https://app.requesty.ai`
+- Create an API key in the dashboard
+
+**Step 2: Connect via Dashboard**
+
+```bash
+9router
+# Dashboard → Providers → Connect Requesty → paste the API key
+```
+
+The key is stored with the existing credential mechanism and validated against `https://router.requesty.ai/v1/models` — it is never logged or exposed to the frontend.
+
+**Step 3: Import models**
+
+- Open the Requesty provider page → the live catalog is fetched with your key (`GET /v1/models`, OpenAI-compatible shape)
+- Only models with zero pricing on every tier are suggested as free; model ids keep their `vendor/model` namespace exactly as returned (e.g. `rq/openai/gpt-4o`)
+
+**Step 4: Use in CLI**
+
+```
+Model: rq/openai/gpt-4o
+```
+
+> The default base URL is `https://router.requesty.ai/v1`. Fixed registry providers don't support a custom base URL in 9Router — to point at a different Requesty-compatible endpoint (e.g. the EU router), add a generic OpenAI-compatible provider node instead.
+
+### Pro Tips
+
+- **IDs are namespaced** - always use the full id (`provider/model`) in requests
+- **Catalog rotates** - re-sync to pick up new free models or drop retired ones
+- **No hardcoded free list** - free status always comes from live API pricing
+
+---
+
 ## Feature Comparison
 
 | Provider | Models | Best Model | Setup | Quota |
@@ -188,6 +236,7 @@ Model: kr/claude-sonnet-4.5
 | **iFlow** | 8 | Kimi K2 Thinking | OAuth | Unlimited |
 | **Qwen** | 3 | Qwen3 Coder Plus | Device Code | Unlimited |
 | **Kiro** | 2 | Claude Sonnet 4.5 | AWS Builder ID | Unlimited |
+| **Requesty** | Rotating | See live catalog | API key | ~200 req/day |
 
 **Winner:** iFlow for variety, Kiro for quality!
 

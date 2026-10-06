@@ -1,6 +1,7 @@
 # Unreleased
 
 ## Features
+- **Requesty**: add Requesty (`rq/requesty`) as a free-tier provider — API key required, OpenAI-compatible via `https://router.requesty.ai/v1`, live model discovery with a free-only filter (every pricing tier must be zero; no trustworthy pricing metadata means not listed as free)
 - **SystemOne**: add combo/auto sequential fallback to `POST /v1/systemone` (`mode: combo|auto`, `model: auto` + `models[]`/`routing.models[]`, named-combo expansion) with routing envelope (`selected_model`, `provider`, `fallback_used`, `attempted`, `usage`); legacy single-`model` pass-through unchanged
 - **SystemOne**: zero-config `model: auto` — discovers SystemOne providers with usable credentials automatically (noAuth free lane first, then configured by registry priority, free model variant preferred, blocked providers skipped), disable via `settings.systemoneAutoEnabled: false`; winners carry `auto_discovered: true`
 - **SystemOne**: official TypeSafe provider (`ts/jev-latest` → `https://api.typesafe.ai/v1/systemone`, priority 50); dashboard media-providers/systemone gains Single/Auto/Combo mode selector with envelope example; profile adds SystemOne Auto Discovery toggle (`settings.systemoneAutoEnabled`, default true)
