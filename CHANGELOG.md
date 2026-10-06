@@ -2,6 +2,7 @@
 
 ## Features
 - **SystemOne**: add combo/auto sequential fallback to `POST /v1/systemone` (`mode: combo|auto`, `model: auto` + `models[]`/`routing.models[]`, named-combo expansion) with routing envelope (`selected_model`, `provider`, `fallback_used`, `attempted`, `usage`); legacy single-`model` pass-through unchanged
+- **SystemOne**: zero-config `model: auto` — discovers SystemOne providers with usable credentials automatically (noAuth free lane first, then configured by registry priority, free model variant preferred, blocked providers skipped), disable via `settings.systemoneAutoEnabled: false`; winners carry `auto_discovered: true`
 
 # v0.5.95 (2026-10-01)
 

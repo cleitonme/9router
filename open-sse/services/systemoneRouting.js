@@ -133,3 +133,52 @@ export function systemoneEnvelopeResponse(payload, status = 200) {
     },
   });
 }
+
+/**
+ * Pick the default SystemOne model id for one provider entry.
+ * Free variant first (lower cost), else the first `kind: "systemone"` id.
+ *
+ * @param {string[]} modelIds - registry model ids already filtered to systemone kind
+ * @returns {string|null}
+ */
+export function pickSystemoneDefaultModel(modelIds) {
+  if (!Array.isArray(modelIds) || modelIds.length === 0) return null;
+  return modelIds.find((id) => typeof id === "string" && /free/i.test(id)) || modelIds[0];
+}
+
+/**
+ * Zero-config discovery: build the auto try-list from registry entries.
+ * Order: noAuth free lanes first (work without any setup), then configured
+ * providers by registry priority. Providers without credentials, without a
+ * systemone model, or currently blocked are skipped.
+ *
+ * Pure/testable: availability checks are injected.
+ *
+ * @param {object} deps
+ * @param {Array} deps.entries - registry entries (need id/alias/priority/noAuth/models/systemoneConfig)
+ * @param {function(string): (boolean|Promise<boolean>)} [deps.hasCredentials]
+ * @param {function(string): boolean} [deps.isBlocked]
+ * @returns {Promise<string[]>} candidate `"alias/model"` strings in try order
+ */
+export async function discoverSystemoneModels({ entries, hasCredentials, isBlocked }) {
+  const free = [];
+  const configured = [];
+  for (const entry of entries || []) {
+    if (!entry?.systemoneConfig) continue;
+    const ids = (entry.models || [])
+      .filter((m) => m?.kind === "systemone" && typeof m.id === "string")
+      .map((m) => m.id);
+    const def = pickSystemoneDefaultModel(ids);
+    if (!def) continue;
+    if (isBlocked?.(entry.id)) continue;
+    const candidate = `${entry.alias || entry.id}/${def}`;
+    const bucket = entry.noAuth ? free : configured;
+    if (!entry.noAuth) {
+      if (!(await hasCredentials?.(entry.id))) continue;
+    }
+    bucket.push({ candidate, priority: entry.priority ?? 999 });
+  }
+  free.sort((a, b) => a.priority - b.priority);
+  configured.sort((a, b) => a.priority - b.priority);
+  return [...free, ...configured].map((x) => x.candidate);
+}

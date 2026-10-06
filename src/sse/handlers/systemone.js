@@ -5,15 +5,18 @@ import {
   extractApiKey,
   isValidApiKey,
 } from "../services/auth.js";
-import { getSettings } from "@/lib/localDb";
+import { getSettings, getProviderConnections } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleSystemoneCore } from "open-sse/handlers/systemoneCore.js";
 import {
   resolveSystemoneTargets,
+  discoverSystemoneModels,
   buildSystemoneSuccessEnvelope,
   buildSystemoneFailureEnvelope,
   systemoneEnvelopeResponse,
 } from "open-sse/services/systemoneRouting.js";
+import { isGatewayBlocked, isLogicalProviderBlocked } from "open-sse/services/providerLock.js";
+import REGISTRY from "open-sse/providers/registry/index.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
@@ -31,6 +34,10 @@ import { saveRequestUsage } from "@/lib/usageDb.js";
  *   `{ "model": "auto", "models": [...], ... }` → sequential fallback by
  *   list order (v1 scope). A provider error never aborts the combo; the
  *   winner is returned inside a routing envelope.
+ * - auto zero-config: `{ "model": "auto", ... }` with no `models` list →
+ *   candidates are discovered from providers that have SystemOne support
+ *   and usable credentials (noAuth free lanes first), unless disabled via
+ *   `settings.systemoneAutoEnabled === false`.
  *
  * @param {Request} request
  */
@@ -89,15 +96,43 @@ export async function handleSystemone(request) {
   }
 
   // Resolve single vs combo/auto targets (combo names expand via localDb).
+  // Zero-config auto: no models list → discover from available providers.
   let targets;
   try {
     targets = await resolveSystemoneTargets(body, (name) => getComboModels(name));
   } catch (err) {
     if (err?.code === "MISSING_MODELS") {
-      log.warn("SYSTEMONE", err.message);
-      return errorResponse(HTTP_STATUS.BAD_REQUEST, err.message);
+      const modeRaw = typeof body?.mode === "string" ? body.mode.toLowerCase() : null;
+      const isAuto = body?.model === "auto" || modeRaw === "auto";
+      if (!isAuto) {
+        log.warn("SYSTEMONE", err.message);
+        return errorResponse(HTTP_STATUS.BAD_REQUEST, err.message);
+      }
+      if (settings.systemoneAutoEnabled === false) {
+        log.warn("SYSTEMONE", "Auto discovery disabled by settings");
+        return errorResponse(HTTP_STATUS.BAD_REQUEST, "Auto model discovery is disabled");
+      }
+      const discovered = await discoverSystemoneModels({
+        entries: REGISTRY,
+        hasCredentials: async (providerId) => {
+          try {
+            const conns = await getProviderConnections({ provider: providerId, isActive: true });
+            return Array.isArray(conns) && conns.length > 0;
+          } catch {
+            return false;
+          }
+        },
+        isBlocked: (providerId) => !!(isGatewayBlocked(providerId) || isLogicalProviderBlocked(providerId)),
+      });
+      if (discovered.length === 0) {
+        log.warn("SYSTEMONE", "Auto discovery found no available SystemOne providers");
+        return errorResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, "No SystemOne providers available");
+      }
+      log.info("SYSTEMONE", `auto discovered ${discovered.length} models: ${discovered.join(", ")}`);
+      targets = { mode: "auto", models: discovered, autoDiscovered: true };
+    } else {
+      throw err;
     }
-    throw err;
   }
 
   if (targets.mode === "single") {
@@ -146,8 +181,8 @@ async function handleSingleSystemone({ body, modelStr, apiKey, url }) {
 }
 
 async function handleMultiSystemone({ body, targets, apiKey, url }) {
-  const { mode, models } = targets;
-  log.info("SYSTEMONE", `${mode} with ${models.length} models (strategy: fallback, sequential)`);
+  const { mode, models, autoDiscovered } = targets;
+  log.info("SYSTEMONE", `${mode} with ${models.length} models (strategy: fallback, sequential${autoDiscovered ? ", auto-discovered" : ""})`);
 
   // Multitenant whitelist (mirrors handleChat): filter candidates per user.
   let candidates = models;
@@ -222,17 +257,17 @@ async function handleMultiSystemone({ body, targets, apiKey, url }) {
         }).catch(() => {});
       }
       log.info("SYSTEMONE", `${mode} winner: ${candidateStr} (fallback_used=${i > 0})`);
-      return systemoneEnvelopeResponse(
-        buildSystemoneSuccessEnvelope({
-          data: result.data,
-          selectedModel: candidateStr,
-          provider,
-          mode,
-          fallbackUsed: i > 0,
-          attempted,
-          usage: result.usage,
-        })
-      );
+      const envelope = buildSystemoneSuccessEnvelope({
+        data: result.data,
+        selectedModel: candidateStr,
+        provider,
+        mode,
+        fallbackUsed: i > 0,
+        attempted,
+        usage: result.usage,
+      });
+      if (autoDiscovered) envelope.auto_discovered = true;
+      return systemoneEnvelopeResponse(envelope);
     }
 
     // A provider error never aborts the combo — record and try next.
@@ -243,10 +278,9 @@ async function handleMultiSystemone({ body, targets, apiKey, url }) {
   const lastStatus = errors.length > 0 ? errors[errors.length - 1].status : HTTP_STATUS.SERVICE_UNAVAILABLE;
   const status = lastStatus && lastStatus >= 400 && lastStatus < 600 ? lastStatus : HTTP_STATUS.SERVICE_UNAVAILABLE;
   log.warn("SYSTEMONE", `All ${candidates.length} ${mode} models failed`);
-  return systemoneEnvelopeResponse(
-    buildSystemoneFailureEnvelope({ mode, attempted, errors }),
-    status
-  );
+  const failure = buildSystemoneFailureEnvelope({ mode, attempted, errors });
+  if (autoDiscovered) failure.auto_discovered = true;
+  return systemoneEnvelopeResponse(failure, status);
 }
 
 /**

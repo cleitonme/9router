@@ -5,6 +5,8 @@ import {
   buildSystemoneSuccessEnvelope,
   buildSystemoneFailureEnvelope,
   extractSystemoneAnswer,
+  discoverSystemoneModels,
+  pickSystemoneDefaultModel,
 } from "open-sse/services/systemoneRouting.js";
 import { handleSystemoneCore } from "open-sse/handlers/systemoneCore.js";
 
@@ -108,6 +110,95 @@ describe("systemone envelope", () => {
   it("extractSystemoneAnswer returns null when no text field", () => {
     expect(extractSystemoneAnswer({ foo: 1 })).toBeNull();
     expect(extractSystemoneAnswer(null)).toBeNull();
+  });
+});
+
+describe("systemone auto discovery (zero-config)", () => {
+  const entries = [
+    {
+      id: "openrouter",
+      alias: "openrouter",
+      priority: 10,
+      systemoneConfig: { baseUrl: "https://openrouter.ai/api/v1/systemone" },
+      models: [{ id: "typesafe/jev-1.13", kind: "systemone" }],
+    },
+    {
+      id: "opencode",
+      alias: "oc",
+      priority: 40,
+      noAuth: true,
+      systemoneConfig: { baseUrl: "https://opencode.ai/zen/v1/systemone" },
+      models: [{ id: "jev-1.13-free", kind: "systemone" }],
+    },
+    {
+      id: "v1m",
+      alias: "v1m",
+      priority: 45,
+      systemoneConfig: { baseUrl: "https://v1m.ir/v1/systemone" },
+      models: [
+        { id: "rev-latest", kind: "systemone" },
+        { id: "v1m-decision-engine", kind: "systemone" },
+      ],
+    },
+    {
+      id: "opencode-zen",
+      alias: "ocz",
+      priority: 205,
+      systemoneConfig: { baseUrl: "https://opencode.ai/zen/v1/systemone" },
+      models: [
+        { id: "jev-1.13", kind: "systemone" },
+        { id: "jev-1.13-free", kind: "systemone" },
+      ],
+    },
+    // No systemone support → never a candidate
+    { id: "openai", alias: "openai", priority: 1, models: [{ id: "gpt-5", kind: "llm" }] },
+  ];
+
+  it("puts noAuth free first, then configured providers by priority, free variant preferred", async () => {
+    const models = await discoverSystemoneModels({
+      entries,
+      hasCredentials: async (id) => id === "openrouter" || id === "opencode-zen",
+      isBlocked: () => false,
+    });
+    expect(models).toEqual([
+      "oc/jev-1.13-free",
+      "openrouter/typesafe/jev-1.13",
+      "ocz/jev-1.13-free",
+    ]);
+  });
+
+  it("works with only the noAuth lane (true zero-config)", async () => {
+    const models = await discoverSystemoneModels({
+      entries,
+      hasCredentials: async () => false,
+      isBlocked: () => false,
+    });
+    expect(models).toEqual(["oc/jev-1.13-free"]);
+  });
+
+  it("skips blocked providers", async () => {
+    const models = await discoverSystemoneModels({
+      entries,
+      hasCredentials: async () => true,
+      isBlocked: (id) => id === "opencode",
+    });
+    expect(models[0]).toBe("openrouter/typesafe/jev-1.13");
+    expect(models).not.toContain("oc/jev-1.13-free");
+  });
+
+  it("returns [] when nothing is available", async () => {
+    const models = await discoverSystemoneModels({
+      entries: entries.filter((e) => !e.noAuth),
+      hasCredentials: async () => false,
+      isBlocked: () => false,
+    });
+    expect(models).toEqual([]);
+  });
+
+  it("pickSystemoneDefaultModel prefers free, falls back to first", () => {
+    expect(pickSystemoneDefaultModel(["jev-1.13", "jev-1.13-free"])).toBe("jev-1.13-free");
+    expect(pickSystemoneDefaultModel(["rev-latest", "v1m-decision-engine"])).toBe("rev-latest");
+    expect(pickSystemoneDefaultModel([])).toBeNull();
   });
 });
 
