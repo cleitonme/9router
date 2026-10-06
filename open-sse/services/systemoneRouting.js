@@ -16,7 +16,7 @@ const MULTI_MODES = new Set(["combo", "auto"]);
  * (+ any extra TypeSafe fields the client sent, e.g. `tools`).
  */
 export function sanitizeSystemoneUpstreamBody(body, model) {
-  const { model: _m, models: _ms, mode: _md, routing: _r, combo: _c, ...rest } = body || {};
+  const { model: _m, models: _ms, mode: _md, routing: _r, combo: _c, envelope: _e, ...rest } = body || {};
   return { ...rest, model };
 }
 
@@ -132,6 +132,47 @@ export function systemoneEnvelopeResponse(payload, status = 200) {
       "Access-Control-Allow-Origin": "*",
     },
   });
+}
+
+/**
+ * Opt-in check for the routing envelope. Default is native upstream
+ * passthrough (same shape as single-model), so swapping only the model
+ * to `"auto"` never breaks existing clients.
+ *
+ * Enable with `"envelope": true` in the body or `?envelope=1`.
+ */
+export function shouldUseSystemoneEnvelope(body, searchParams) {
+  if (body?.envelope === true) return true;
+  try {
+    const v =
+      typeof searchParams?.get === "function" ? searchParams.get("envelope") : searchParams?.envelope;
+    return v === "1" || v === "true";
+  } catch {
+    return false;
+  }
+}
+
+export const SYSTEMONE_ROUTING_HEADER_NAMES = [
+  "x-9router-selected-model",
+  "x-9router-provider",
+  "x-9router-mode",
+  "x-9router-fallback-used",
+  "x-9router-attempted",
+];
+
+/**
+ * Routing metadata as response headers — carried on the native passthrough
+ * response so the body stays byte-compatible with single-model clients.
+ */
+export function systemoneRoutingHeaders({ selectedModel, provider, mode, fallbackUsed, attempted }) {
+  return {
+    "x-9router-selected-model": selectedModel || "",
+    "x-9router-provider": provider || "",
+    "x-9router-mode": mode || "",
+    "x-9router-fallback-used": fallbackUsed ? "true" : "false",
+    "x-9router-attempted": (Array.isArray(attempted) ? attempted : []).join(","),
+    "Access-Control-Expose-Headers": SYSTEMONE_ROUTING_HEADER_NAMES.join(", "),
+  };
 }
 
 /**

@@ -12,7 +12,8 @@ import {
   resolveSystemoneTargets,
   discoverSystemoneModels,
   buildSystemoneSuccessEnvelope,
-  buildSystemoneFailureEnvelope,
+  shouldUseSystemoneEnvelope,
+  systemoneRoutingHeaders,
   systemoneEnvelopeResponse,
 } from "open-sse/services/systemoneRouting.js";
 import { isGatewayBlocked, isLogicalProviderBlocked } from "open-sse/services/providerLock.js";
@@ -224,6 +225,9 @@ async function handleMultiSystemone({ body, targets, apiKey, url }) {
 
   const attempted = [];
   const errors = [];
+  // Envelope is opt-in only. Default is the native upstream body (same shape
+  // as single-model), so clients that only swap the model keep working.
+  const wantEnvelope = shouldUseSystemoneEnvelope(body, url?.searchParams);
 
   for (let i = 0; i < candidates.length; i++) {
     const candidateStr = candidates[i];
@@ -257,17 +261,35 @@ async function handleMultiSystemone({ body, targets, apiKey, url }) {
         }).catch(() => {});
       }
       log.info("SYSTEMONE", `${mode} winner: ${candidateStr} (fallback_used=${i > 0})`);
-      const envelope = buildSystemoneSuccessEnvelope({
-        data: result.data,
+      const routingHeaders = systemoneRoutingHeaders({
         selectedModel: candidateStr,
         provider,
         mode,
         fallbackUsed: i > 0,
         attempted,
-        usage: result.usage,
       });
-      if (autoDiscovered) envelope.auto_discovered = true;
-      return systemoneEnvelopeResponse(envelope);
+      if (wantEnvelope) {
+        const envelope = buildSystemoneSuccessEnvelope({
+          data: result.data,
+          selectedModel: candidateStr,
+          provider,
+          mode,
+          fallbackUsed: i > 0,
+          attempted,
+          usage: result.usage,
+        });
+        if (autoDiscovered) envelope.auto_discovered = true;
+        return systemoneEnvelopeResponse(envelope);
+      }
+      // Native passthrough: identical shape to single-model responses.
+      return new Response(JSON.stringify(result.data ?? null), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+          ...routingHeaders,
+        },
+      });
     }
 
     // A provider error never aborts the combo — record and try next.
@@ -277,10 +299,11 @@ async function handleMultiSystemone({ body, targets, apiKey, url }) {
 
   const lastStatus = errors.length > 0 ? errors[errors.length - 1].status : HTTP_STATUS.SERVICE_UNAVAILABLE;
   const status = lastStatus && lastStatus >= 400 && lastStatus < 600 ? lastStatus : HTTP_STATUS.SERVICE_UNAVAILABLE;
+  const lastError = errors.length > 0 ? errors[errors.length - 1].message : "All accounts unavailable";
   log.warn("SYSTEMONE", `All ${candidates.length} ${mode} models failed`);
-  const failure = buildSystemoneFailureEnvelope({ mode, attempted, errors });
-  if (autoDiscovered) failure.auto_discovered = true;
-  return systemoneEnvelopeResponse(failure, status);
+  // Standard error shape (same contract as single-model failures) — per-model
+  // detail stays server-side in logs, never leaks keys.
+  return errorResponse(status, `[${mode}] All ${candidates.length} models unavailable (tried: ${attempted.join(", ")}). Last error: ${lastError}`);
 }
 
 /**

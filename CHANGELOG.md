@@ -7,6 +7,7 @@
 - **SystemOne**: add combo/auto sequential fallback to `POST /v1/systemone` (`mode: combo|auto`, `model: auto` + `models[]`/`routing.models[]`, named-combo expansion) with routing envelope (`selected_model`, `provider`, `fallback_used`, `attempted`, `usage`); legacy single-`model` pass-through unchanged
 - **SystemOne**: zero-config `model: auto` — discovers SystemOne providers with usable credentials automatically (noAuth free lane first, then configured by registry priority, free model variant preferred, blocked providers skipped), disable via `settings.systemoneAutoEnabled: false`; winners carry `auto_discovered: true`
 - **SystemOne**: official TypeSafe provider (`ts/jev-latest` → `https://api.typesafe.ai/v1/systemone`, priority 50); dashboard media-providers/systemone gains Single/Auto/Combo mode selector with envelope example; profile adds SystemOne Auto Discovery toggle (`settings.systemoneAutoEnabled`, default true)
+- **SystemOne**: fix auto/combo returning the routing envelope on HTTP 200 (moved `answers` under `data`, breaking clients that only swap the model) — auto/combo now return the native upstream body by default with routing metadata in `x-9router-*` headers; envelope is opt-in via `"envelope": true` or `?envelope=1`; total failure returns the standard `{error}` shape
 
 # v0.5.95 (2026-10-01)
 

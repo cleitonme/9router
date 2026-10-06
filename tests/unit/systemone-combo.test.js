@@ -7,6 +7,8 @@ import {
   extractSystemoneAnswer,
   discoverSystemoneModels,
   pickSystemoneDefaultModel,
+  shouldUseSystemoneEnvelope,
+  systemoneRoutingHeaders,
 } from "open-sse/services/systemoneRouting.js";
 import { handleSystemoneCore } from "open-sse/handlers/systemoneCore.js";
 
@@ -202,7 +204,50 @@ describe("systemone auto discovery (zero-config)", () => {
   });
 });
 
+describe("systemone envelope opt-in (native passthrough by default)", () => {
+  it("defaults to passthrough: no envelope without flag or query", () => {
+    expect(shouldUseSystemoneEnvelope({ model: "auto", state: "s", questions: {} }, new URLSearchParams())).toBe(false);
+    expect(shouldUseSystemoneEnvelope({ model: "auto", state: "s", questions: {} }, null)).toBe(false);
+  });
+
+  it("opts in via body flag", () => {
+    expect(shouldUseSystemoneEnvelope({ model: "auto", envelope: true }, null)).toBe(true);
+    expect(shouldUseSystemoneEnvelope({ model: "auto", envelope: false }, null)).toBe(false);
+  });
+
+  it("opts in via ?envelope=1 query", () => {
+    expect(shouldUseSystemoneEnvelope({ model: "auto" }, new URLSearchParams("envelope=1"))).toBe(true);
+    expect(shouldUseSystemoneEnvelope({ model: "auto" }, new URLSearchParams("envelope=0"))).toBe(false);
+  });
+
+  it("exposes routing metadata as headers without touching the body", () => {
+    const headers = systemoneRoutingHeaders({
+      selectedModel: "ts/jev-latest",
+      provider: "typesafe",
+      mode: "auto",
+      fallbackUsed: true,
+      attempted: ["oc/jev-1.13-free", "ts/jev-latest"],
+    });
+    expect(headers["x-9router-selected-model"]).toBe("ts/jev-latest");
+    expect(headers["x-9router-provider"]).toBe("typesafe");
+    expect(headers["x-9router-mode"]).toBe("auto");
+    expect(headers["x-9router-fallback-used"]).toBe("true");
+    expect(headers["x-9router-attempted"]).toBe("oc/jev-1.13-free,ts/jev-latest");
+    expect(headers["Access-Control-Expose-Headers"]).toContain("x-9router-selected-model");
+  });
+
+  it("strips the envelope flag before forwarding upstream", () => {
+    expect(
+      sanitizeSystemoneUpstreamBody(
+        { model: "x", envelope: true, mode: "auto", state: "s", questions: {} },
+        "short"
+      )
+    ).toEqual({ state: "s", questions: {}, model: "short" });
+  });
+});
+
 describe("systemoneCore upstream sanitization", () => {
+
   it("strips gateway-only routing fields before forwarding", async () => {
     let sentUrl = null;
     let sentBody = null;

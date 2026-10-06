@@ -88,6 +88,9 @@ export const KIND_EXAMPLE_CONFIG = {
     },
     defaultResponse: `{\n  "model": "jev-1.13",\n  "answers": {\n    "is_urgent": { "type": "noul", "noul": 0.99 }\n  },\n  "usage": { "input_tokens": 312, "output_tokens": 48 }\n}`,
     modes: ["single", "auto", "combo"],
-    autoResponse: `{\n  "success": true,\n  "data": { "model": "jev-1.13", "answers": { "is_urgent": { "type": "noul", "noul": 0.99 } } },\n  "selected_model": "ts/jev-latest",\n  "provider": "typesafe",\n  "mode": "auto",\n  "fallback_used": false,\n  "auto_discovered": true,\n  "attempted": ["oc/jev-1.13-free", "ts/jev-latest"],\n  "usage": { "prompt_tokens": 312, "completion_tokens": 48, "total_tokens": 360 }\n}`,
+    // Auto/combo return the native upstream body by default (same shape as
+    // single). Routing metadata travels in x-9router-* response headers.
+    // Opt into the routing envelope with "envelope": true or ?envelope=1.
+    autoResponse: `{\n  "model": "jev-1.13",\n  "answers": {\n    "is_urgent": { "type": "noul", "noul": 0.99 }\n  },\n  "usage": { "input_tokens": 312, "output_tokens": 48 }\n}\n// headers: x-9router-selected-model=ts/jev-latest, x-9router-provider=typesafe,\n// x-9router-mode=auto, x-9router-fallback-used=false`,
   },
 };
