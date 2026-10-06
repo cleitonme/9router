@@ -2,7 +2,7 @@
  * Shared combo (model combo) handling with fallback support
  */
 
-import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
+import { formatRetryAfter } from "./accountFallback.js";
 import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
@@ -331,24 +331,9 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         try { errorText = JSON.stringify(errorText); } catch { errorText = String(errorText); }
       }
 
-      // Check if should fallback to next model
-      const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText);
-
-      if (!shouldFallback) {
-        log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
-        return result;
-      }
-
-      // For transient errors (503/502/504), wait for cooldown before falling through
-      // so a briefly-overloaded provider gets a chance to recover rather than being
-      // skipped immediately (fixes: combo falls through on transient 503)
-      if (cooldownMs && cooldownMs > 0 && cooldownMs <= 5000 &&
-          (result.status === 503 || result.status === 502 || result.status === 504)) {
-        log.info("COMBO", `Model ${modelStr} transient ${result.status}, waiting ${cooldownMs}ms before next`);
-        await new Promise(r => setTimeout(r, cooldownMs));
-      }
-
-      // Fallback to next model
+      // Fallback to next model immediately with zero artificial delay.
+      // In a combo, different models belong to different providers, so transient
+      // failures or model-specific errors (400, 429, 500, etc.) must not block or abort fallback.
       lastError = errorText || String(result.status);
       if (!lastStatus) lastStatus = result.status;
       log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
