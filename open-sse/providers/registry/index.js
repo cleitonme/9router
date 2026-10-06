@@ -135,6 +135,7 @@ import p132 from "./v1m.js";
 import p133 from "./muse.js";
 import p134 from "./typesafe.js";
 import p135 from "./requesty.js";
+import p136 from "./seekai.js";
 export default [
   p0,
   p1,
@@ -270,4 +271,5 @@ export default [
   p133,
   p134,
   p135,
+  p136,
 ];

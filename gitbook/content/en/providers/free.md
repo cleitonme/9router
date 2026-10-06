@@ -229,6 +229,54 @@ Model: rq/openai/gpt-4o
 
 ---
 
+## SeekAI (API key, free tier — availability unconfirmed)
+
+> ⚠️ SeekAI could **not** be confirmed as free. It is a usage-metered gateway (quota in USD, top-up enabled, open registration). Do not treat it as a guaranteed free tier — verify the current terms on `https://seekai.cc` before relying on it.
+
+### Pricing
+
+| Plan | Monthly Cost | Models | Quota |
+|------|--------------|--------|-------|
+| Unconfirmed | — | Discovered live via `/v1/models` | Metered per provider terms |
+
+### Setup
+
+**Step 1: Get a SeekAI API key**
+
+- Sign up at `https://seekai.cc/sign-up`
+- Create an API key in the dashboard
+
+**Step 2: Connect via Dashboard**
+
+```bash
+9router
+# Dashboard → Providers → Connect SeekAi → paste the API key
+```
+
+The key is stored with the existing credential mechanism and validated against `https://seekai.cc/v1/models` — it is never logged or exposed to the frontend.
+
+**Step 3: Import models**
+
+- Open the SeekAi provider page → the live catalog is fetched with your key (`GET /v1/models`, OpenAI-compatible envelope). Discovery requires a valid key: without one the endpoint answers `401`.
+- Model ids are *bare* (no vendor namespace, e.g. `ska/claude-sonnet-5`) and are preserved exactly as returned — no fixed list is kept in code, so re-sync to pick up catalog changes.
+- Nothing is classified as free: the API publishes no trustworthy per-model pricing, so every model is treated as metered.
+
+**Step 4: Use in CLI**
+
+```
+Model: ska/claude-sonnet-5
+```
+
+> The default base URL is `https://seekai.cc/v1`. Fixed registry providers don't support a custom base URL in 9Router — to point at a different OpenAI-compatible endpoint, add a generic OpenAI-compatible provider node instead.
+
+### Pro Tips
+
+- **Bare ids** - use the id exactly as listed (`ska/` + upstream id, no vendor prefix added or removed)
+- **No duplicates** - re-sync keeps existing entries; models are matched by exact id
+- **Auth errors** - `401/403` from upstream means the key is invalid or revoked; the key itself never appears in error responses
+
+---
+
 ## Feature Comparison
 
 | Provider | Models | Best Model | Setup | Quota |
@@ -237,6 +285,7 @@ Model: rq/openai/gpt-4o
 | **Qwen** | 3 | Qwen3 Coder Plus | Device Code | Unlimited |
 | **Kiro** | 2 | Claude Sonnet 4.5 | AWS Builder ID | Unlimited |
 | **Requesty** | Rotating | See live catalog | API key | ~200 req/day |
+| **SeekAI** | Live catalog | See live catalog | API key | Unconfirmed (metered) |
 
 **Winner:** iFlow for variety, Kiro for quality!
 

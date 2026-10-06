@@ -167,8 +167,8 @@ function buildQoderModelsResolver(providerId) {
   };
 }
 
-// Provider models endpoints configuration
-const PROVIDER_MODELS_CONFIG = {
+// Provider models endpoints configuration (exported for unit tests)
+export const PROVIDER_MODELS_CONFIG = {
   "muse": {
     url: "https://api.meta.ai/v1/models",
     method: "GET",
@@ -310,6 +310,9 @@ const PROVIDER_MODELS_CONFIG = {
   // OpenAI-compatible aggregators.
   tokenharbor: createOpenAIModelsConfig("https://tokenharbor.ai/v1/models"),
   requesty: createOpenAIModelsConfig("https://router.requesty.ai/v1/models"),
+  // SeekAi (New API gateway): GET /v1/models requires a Bearer key (401
+  // without one); the handler below sends the connection's key server-side.
+  seekai: createOpenAIModelsConfig("https://seekai.cc/v1/models"),
   dahl: createOpenAIModelsConfig("https://inference.dahl.global/v1/models"),
   atria: createOpenAIModelsConfig("https://api.atria-asi.ai/v1/models"),
   agnes: createOpenAIModelsConfig("https://apihub.agnes-ai.com/v1/models"),

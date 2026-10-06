@@ -1167,5 +1167,10 @@
     "baseUrl": "https://router.requesty.ai/v1/chat/completions",
     "validateUrl": "https://router.requesty.ai/v1/models",
     "format": "openai"
+  },
+  "seekai": {
+    "baseUrl": "https://seekai.cc/v1/chat/completions",
+    "validateUrl": "https://seekai.cc/v1/models",
+    "format": "openai"
   }
 }
