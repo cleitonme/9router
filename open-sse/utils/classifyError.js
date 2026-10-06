@@ -1,9 +1,20 @@
 import { parseResetsAtMsFromHeaders } from "./error.js";
+import {
+  PAYMENT_REQUIRED_PATTERNS,
+  MODEL_RETIRED_PATTERNS,
+  MODEL_NOT_FOUND_PATTERNS,
+  ACCOUNT_ACCESS_PATTERNS,
+  ROUTE_INCOMPATIBLE_PATTERNS,
+} from "../config/errorConfig.js";
 
 // Canonical error types for fallback decisions.
 export const CLASSIFIED_TYPES = {
   INVALID_CREDENTIALS: "invalid_credentials",
+  PAYMENT_REQUIRED: "payment_required",
   QUOTA_EXHAUSTED: "quota_exhausted",
+  MODEL_RETIRED: "model_retired",
+  MODEL_NOT_FOUND: "model_not_found",
+  ROUTE_INCOMPATIBLE: "route_incompatible",
   UPSTREAM_OVERLOAD: "upstream_overload",
   UPSTREAM_RATE_LIMIT: "upstream_rate_limit",
   CONCURRENCY_LIMIT: "concurrency_limit",
@@ -168,7 +179,74 @@ export function classifyError({ status, bodyText = "", bodyJson = null, headers 
     }
   }
 
-  // 2) Auth: invalid/disabled key. Single refresh elsewhere; here: no retry, long account lock.
+  // 2) Permanent model retirement: 410 Gone or explicit EOL wording.
+  // Never confuse with a dead account — scope is model@provider, and the
+  // caller must skip the candidate instead of burning every account.
+  const retiredHit = MODEL_RETIRED_PATTERNS.some((p) => lower.includes(p));
+  if (s === 410 || retiredHit) {
+    // A 403/404 carrying EOL wording is still a retirement, not an auth error.
+    return {
+      type: CLASSIFIED_TYPES.MODEL_RETIRED, scope: CLASSIFIED_SCOPES.MODEL,
+      retryable: false, maxRetries: 0, retryAfterMs: null,
+      upstreamProvider: env.providerName || null, limitSource: env.limitSource,
+      remedyHint: env.remedyHint, isByok: env.isByok, current: env.current, limit: env.limit,
+    };
+  }
+
+  // 3) Account billing/access: 402 of any wording, or balance/plan wording on
+  // any status (incl. 429 "Insufficient balance"). Scope is ALWAYS the single
+  // affected account — never disable the model globally because one key is broke.
+  const paymentHit = PAYMENT_REQUIRED_PATTERNS.some((p) => lower.includes(p));
+  if (s === 402 || paymentHit) {
+    const quotaLike = lower.includes("daily limit") || lower.includes("quota exceeded") || lower.includes("rate limit");
+    // Pure daily-quota wording without billing signal stays quota_exhausted;
+    // anything billing-flavoured (or bare 402) is account-scoped payment.
+    if (!quotaLike || s === 402 || paymentHit) {
+      return {
+        type: CLASSIFIED_TYPES.PAYMENT_REQUIRED, scope: CLASSIFIED_SCOPES.ACCOUNT,
+        retryable: false, maxRetries: 0, retryAfterMs: retryAfterMs || null,
+        upstreamProvider: env.providerName || null, limitSource: env.limitSource,
+        remedyHint: env.remedyHint, isByok: env.isByok, current: env.current, limit: env.limit,
+      };
+    }
+  }
+
+  // 4) Model not found vs not enabled for this account vs route incompatible.
+  // Same status (404/400/422) — different scope. Recording the wrong scope is
+  // what used to retire healthy models or burn healthy accounts.
+  const routeHit = ROUTE_INCOMPATIBLE_PATTERNS.some((p) => lower.includes(p));
+  if (routeHit) {
+    return {
+      type: CLASSIFIED_TYPES.ROUTE_INCOMPATIBLE, scope: CLASSIFIED_SCOPES.MODEL,
+      retryable: false, maxRetries: 0, retryAfterMs: null,
+      upstreamProvider: env.providerName || null, limitSource: env.limitSource,
+      remedyHint: env.remedyHint, isByok: env.isByok, current: env.current, limit: env.limit,
+    };
+  }
+  const accessHit = ACCOUNT_ACCESS_PATTERNS.some((p) => lower.includes(p));
+  if (accessHit) {
+    return {
+      type: CLASSIFIED_TYPES.MODEL_NOT_FOUND, scope: CLASSIFIED_SCOPES.ACCOUNT,
+      retryable: false, maxRetries: 0, retryAfterMs: null,
+      upstreamProvider: env.providerName || null, limitSource: env.limitSource,
+      remedyHint: env.remedyHint, isByok: env.isByok, current: env.current, limit: env.limit,
+    };
+  }
+  const notFoundHit = MODEL_NOT_FOUND_PATTERNS.some((p) => lower.includes(p));
+  if (s === 404 || notFoundHit) {
+    // Bare 404 without wording is still model-scoped (skip candidate), never
+    // an account lock and never an abort of the whole combo.
+    if (s === 404 || notFoundHit) {
+      return {
+        type: CLASSIFIED_TYPES.MODEL_NOT_FOUND, scope: CLASSIFIED_SCOPES.MODEL,
+        retryable: false, maxRetries: 0, retryAfterMs: null,
+        upstreamProvider: env.providerName || null, limitSource: env.limitSource,
+        remedyHint: env.remedyHint, isByok: env.isByok, current: env.current, limit: env.limit,
+      };
+    }
+  }
+
+  // 5) Auth: invalid/disabled key. Single refresh elsewhere; here: no retry, long account lock.
   // Any bare 401 (or 403 without quota wording) is an auth failure even when
   // the message is unrecognized — never treat it as transient/invalid_request.
   if (s === 401 || s === 403) {

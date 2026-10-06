@@ -1,4 +1,4 @@
-import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS, ACCOUNT_INVALID_COOLDOWN_MS, QUOTA_EXHAUSTED_DEFAULT_MS } from "../config/errorConfig.js";
+import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS, ACCOUNT_INVALID_COOLDOWN_MS, QUOTA_EXHAUSTED_DEFAULT_MS, PAYMENT_REQUIRED_COOLDOWN_MS, MODEL_SKIP_COOLDOWN_MS } from "../config/errorConfig.js";
 import { classifyError } from "../utils/classifyError.js";
 
 /**
@@ -33,6 +33,21 @@ export function checkFallbackError(status, errorText, backoffLevel = 0, provider
     if (c && c.type && c.type !== "unknown") {
       if (c.type === "invalid_credentials") {
         return { shouldFallback: true, cooldownMs: ACCOUNT_INVALID_COOLDOWN_MS, classification: c };
+      }
+      if (c.type === "payment_required") {
+        // Billing / plan / balance failure: account-scoped only. The model
+        // stays eligible on every other healthy account.
+        const precise = extra?.retryAfterMs && extra.retryAfterMs > Date.now()
+          ? extra.retryAfterMs - Date.now()
+          : (c.retryAfterMs && c.retryAfterMs > Date.now() ? c.retryAfterMs - Date.now() : PAYMENT_REQUIRED_COOLDOWN_MS);
+        return { shouldFallback: true, cooldownMs: precise, classification: c };
+      }
+      if (c.type === "model_retired" || c.type === "model_not_found" || c.type === "route_incompatible") {
+        // Skip the candidate (next account/model in the combo) without
+        // parking healthy accounts behind a long lock. The durable
+        // unavailable_provider state lives in kv modelHealth (recorded by the
+        // caller), not in modelLock_*.
+        return { shouldFallback: true, cooldownMs: MODEL_SKIP_COOLDOWN_MS, classification: c };
       }
       if (c.type === "quota_exhausted") {
         const precise = extra?.retryAfterMs && extra.retryAfterMs > Date.now()

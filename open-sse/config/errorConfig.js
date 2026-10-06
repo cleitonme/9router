@@ -49,6 +49,78 @@ export const QUOTA_EXHAUSTED_DEFAULT_MS = 6 * 60 * 60 * 1000; // daily quota w/o
 export const UPSTREAM_BACKOFF_MIN_MS = 1000;
 export const UPSTREAM_BACKOFF_MAX_MS = 5000;
 
+// Account-scoped billing/access cooldown (402 paid-model, insufficient
+// balance, free-plan exclusion). Locks ONLY the affected account, never the
+// model globally — a free model must not look dead because one key lacks funds.
+export const PAYMENT_REQUIRED_COOLDOWN_MS = 30 * 60 * 1000;
+// Provider-scoped model retirement recheck (410 EOL). Permanent errors are
+// re-verified rarely; transient errors use short cooldowns instead.
+export const MODEL_RETIRED_RECHECK_MS = 7 * 24 * 60 * 60 * 1000;
+// Model-not-found / route-incompatible: skip the candidate without parking
+// healthy accounts behind a long lock.
+export const MODEL_SKIP_COOLDOWN_MS = 60 * 1000;
+
+// Substring signals (lowercased before match). Kept here — never hardcoded
+// in classifyError.js / accountFallback.js (config-driven convention).
+export const PAYMENT_REQUIRED_PATTERNS = [
+  "paid model",
+  "credits required",
+  "payment required",
+  "insufficient balance",
+  "insufficient funds",
+  "no resource package",
+  "not included in",
+  "not included in your",
+  "free-use",
+  "free use",
+  "billing",
+  "top up your balance",
+  "top-up your balance",
+  "add funds",
+  "out of credits",
+  "no credits",
+  "quota has been exhausted",
+];
+export const MODEL_RETIRED_PATTERNS = [
+  "end of life",
+  "end-of-life",
+  "decommissioned",
+  "retired",
+  "discontinued",
+  "no longer supported",
+  "no longer available",
+  "has been removed",
+  "model has been removed",
+  "sunset",
+  "deprecated and removed",
+];
+export const MODEL_NOT_FOUND_PATTERNS = [
+  "model_not_found",
+  "no such model",
+  "model not found",
+  "unknown model",
+  "does not exist",
+  "model does not exist",
+  "not a valid model",
+];
+export const ACCOUNT_ACCESS_PATTERNS = [
+  "not enabled for",
+  "not entitled",
+  "access denied for",
+  "no access to this model",
+  "not authorized for this model",
+  "not have access",
+];
+export const ROUTE_INCOMPATIBLE_PATTERNS = [
+  "unknown variant",
+  "invalid variant",
+  "unsupported format",
+  "incompatible route",
+  "route not supported",
+  "format not supported",
+  "unsupported route",
+];
+
 // Cooldown durations (ms)
 const COOLDOWN = {
   long: 2 * 60 * 1000,

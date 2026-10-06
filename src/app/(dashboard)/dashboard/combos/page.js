@@ -55,6 +55,7 @@ const STRATEGY_OPTIONS = [
 export default function CombosPage() {
   const [combos, setCombos] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [modelHealth, setModelHealth] = useState({ enabled: false, mode: "observe" });
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingCombo, setEditingCombo] = useState(null);
   const [activeProviders, setActiveProviders] = useState([]);
@@ -164,12 +165,18 @@ export default function CombosPage() {
       const providersData = await providersRes.json();
       const settingsData = settingsRes.ok ? await settingsRes.json() : {};
 
-      // Only LLM combos here - webSearch/webFetch combos belong to media-providers/web
-      if (combosRes.ok) setCombos((combosData.combos || []).filter(c => !c.kind || c.kind === "llm"));
+      // Only LLM combos here - webSearch/webFetch combos belong to media-providers/web.
+      // "managed" combos live here too: same candidate list, but unavailable
+      // models are skipped automatically at request time.
+      if (combosRes.ok) setCombos((combosData.combos || []).filter(c => !c.kind || c.kind === "llm" || c.kind === "managed"));
       if (providersRes.ok) {
         setActiveProviders(providersData.connections || []);
       }
       setComboStrategies(settingsData.comboStrategies || {});
+      setModelHealth({
+        enabled: settingsData.modelHealth?.enabled === true,
+        mode: settingsData.modelHealth?.mode === "enforce" ? "enforce" : "observe",
+      });
       const rawAdapter = settingsData.capacityAdapter || {};
       const normalized = {};
       for (const cap of CAPACITY_ADAPTER_CAPS) {
@@ -517,6 +524,23 @@ export default function CombosPage() {
         getCaps={getCaps}
       />
 
+      {/* Model health — periodic re-verification (conservative: off + observe-only) */}
+      <ModelHealthSection
+        modelHealth={modelHealth}
+        onChange={async (next) => {
+          setModelHealth(next);
+          try {
+            await fetch("/api/settings", {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ modelHealth: next }),
+            });
+          } catch (error) {
+            console.log("Error updating model health settings:", error);
+          }
+        }}
+      />
+
       {/* Create Modal - Use key to force remount and reset state */}
       {showCreateModal && (
         <ComboFormModal
@@ -591,7 +615,14 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
             <span className="material-symbols-outlined text-primary text-[18px]">layers</span>
           </div>
           <div className="min-w-0 flex-1">
-            <code className="block truncate font-mono text-sm font-medium">{combo.name}</code>
+            <div className="flex items-center gap-1.5">
+              <code className="block truncate font-mono text-sm font-medium">{combo.name}</code>
+              {combo.kind === "managed" && (
+                <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary" title="Unavailable models are skipped automatically">
+                  managed
+                </span>
+              )}
+            </div>
             <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
               {combo.models.length === 0 ? (
                 <span className="text-xs text-text-muted italic">No models</span>
@@ -1006,10 +1037,50 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
   );
 }
 
+function ModelHealthSection({ modelHealth, onChange }) {
+  const enabled = modelHealth?.enabled === true;
+  const mode = modelHealth?.mode === "enforce" ? "enforce" : "observe";
+  return (
+    <Card padding="sm">
+      <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-3">
+          <div className="size-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+            <span className="material-symbols-outlined text-primary text-[18px]">monitor_heart</span>
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-medium">Model health re-checks</p>
+            <p className="text-[11px] text-text-muted">
+              {enabled
+                ? (mode === "enforce" ? "On — unhealthy models are skipped in routing" : "On — observation only, nothing is filtered")
+                : "Off — enable to re-test unavailable models periodically"}
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Toggle checked={enabled} onChange={(v) => onChange({ ...modelHealth, enabled: !!v })} />
+          <div className="w-[220px]">
+            <Select
+              options={[
+                { value: "observe", label: "Observe — log only" },
+                { value: "enforce", label: "Enforce — skip unhealthy" },
+              ]}
+              value={mode}
+              placeholder="Mode"
+              onChange={(e) => onChange({ ...modelHealth, mode: e.target.value })}
+              selectClassName="py-1.5 text-xs"
+            />
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindFilter = null }) {
   // Initialize state with combo values - key prop on parent handles reset on remount
   const [name, setName] = useState(combo?.name || "");
   const [models, setModels] = useState(combo?.models || []);
+  const [kind, setKind] = useState(combo?.kind === "managed" ? "managed" : "llm");
   const [showModelSelect, setShowModelSelect] = useState(false);
   const [saving, setSaving] = useState(false);
   const [nameError, setNameError] = useState("");
@@ -1100,7 +1171,7 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
   const handleSave = async () => {
     if (!validateName(name)) return;
     setSaving(true);
-    await onSave({ name: name.trim(), models });
+    await onSave({ name: name.trim(), models, kind });
     setSaving(false);
   };
 
@@ -1126,6 +1197,24 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
             <p className="text-[10px] text-text-muted mt-0.5">
               Only letters, numbers, -, _ and . allowed
             </p>
+          </div>
+
+          {/* Type: manual keeps the exact list; managed skips unavailable models automatically */}
+          <div>
+            <Select
+              label="Combo type"
+              value={kind}
+              onChange={(e) => setKind(e.target.value)}
+              options={[
+                { value: "llm", label: "Manual — always try in order" },
+                { value: "managed", label: "Managed — skip unavailable automatically" },
+              ]}
+            />
+            {kind === "managed" && (
+              <p className="text-[10px] text-text-muted mt-0.5">
+                Blocked models are skipped at request time (order preserved). Manual combos are never auto-modified.
+              </p>
+            )}
           </div>
 
           {/* Models */}

@@ -10,5 +10,9 @@ export async function register() {
 
     const { startModelCatalogSync } = await import("@/lib/modelCatalog/sync.js");
     startModelCatalogSync();
+
+    // Conservative periodic re-verification (default OFF via settings).
+    const { startModelHealthScheduler } = await import("@/lib/modelHealth/scheduler.js");
+    startModelHealthScheduler();
   }
 }

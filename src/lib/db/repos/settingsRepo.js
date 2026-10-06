@@ -68,8 +68,21 @@ const DEFAULT_SETTINGS = {
   // Per-provider user header overrides applied at dispatch: { [providerId]: { headers: {..} } }
   providerOverrides: {},
   // Global: when a Kilo BYOK route is concurrency/rate limited upstream and the
-  // remedy hint says to remove the key, retry once via gateway capacity (no BYOK key).
+  // remedy hint says to remove it, retry once via gateway capacity (no BYOK key).
   kiloPreferGatewayCapacity: false,
+  // Model health (dashboard-configured; no .env). Conservative defaults:
+  // disabled + observe-only so nothing is filtered until explicitly enabled.
+  modelHealth: {
+    enabled: false,
+    mode: "observe",
+    checkIntervalMs: 60 * 60 * 1000,
+    testTimeoutMs: 10 * 1000,
+    testMaxTokens: 16,
+    concurrencyPerProvider: 2,
+  },
+  // Per-provider overrides (dashboard providers page). Same keys as above,
+  // plus discovery/test toggles. Absent provider = inherit global.
+  providerHealth: {},
 };
 
 async function readRaw() {

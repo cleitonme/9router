@@ -68,6 +68,9 @@ export default function ProviderDetailPage() {
   const [bulkUpdatingProxy, setBulkUpdatingProxy] = useState(false);
   const [providerStrategy, setProviderStrategy] = useState(null);
   const [providerStickyLimit, setProviderStickyLimit] = useState("");
+  const [providerHealth, setProviderHealth] = useState({ autoDiscover: false, testModels: false, includeFree: false });
+  const [healthTesting, setHealthTesting] = useState(false);
+  const [healthTestResult, setHealthTestResult] = useState("");
   const [thinkingMode, setThinkingMode] = useState("auto");
   const [autoPing, setAutoPing] = useState({ enabled: false, connections: {} });
   const [suggestedModels, setSuggestedModels] = useState([]);
@@ -325,6 +328,9 @@ export default function ProviderDetailPage() {
       const override = (settingsData.providerStrategies || {})[providerId] || {};
       setProviderStrategy(override.fallbackStrategy || null);
       setProviderStickyLimit(override.stickyRoundRobinLimit != null ? String(override.stickyRoundRobinLimit) : "1");
+      // Load per-provider model-health prefs (conservative: all off)
+      const ph = (settingsData.providerHealth || {})[providerId] || {};
+      setProviderHealth({ autoDiscover: ph.autoDiscover === true, testModels: ph.testModels === true, includeFree: ph.includeFree === true });
       // Load per-provider thinking config
       const thinkingCfg = (settingsData.providerThinking || {})[providerId] || {};
       setThinkingMode(thinkingCfg.mode || "auto");
@@ -415,6 +421,46 @@ export default function ProviderDetailPage() {
   const handleStickyLimitChange = (value) => {
     setProviderStickyLimit(value);
     saveProviderStrategy("round-robin", value);
+  };
+
+  const saveProviderHealth = async (next) => {
+    setProviderHealth(next);
+    try {
+      const settingsRes = await fetch("/api/settings", { cache: "no-store" });
+      const settingsData = settingsRes.ok ? await settingsRes.json() : {};
+      const current = settingsData.providerHealth || {};
+      const updated = { ...current, [providerId]: next };
+      await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerHealth: updated }),
+      });
+    } catch (error) {
+      console.log("Error saving provider health config:", error);
+    }
+  };
+
+  const handleHealthTestNow = async () => {
+    setHealthTesting(true);
+    setHealthTestResult("");
+    try {
+      const res = await fetch("/api/models/health-check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: providerId, limit: 10 }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        const okCount = (data.results || []).filter((r) => r.ok).length;
+        setHealthTestResult(`Tested ${data.tested || 0}, ok ${okCount}`);
+      } else {
+        setHealthTestResult(data.error || "Health check failed");
+      }
+    } catch (error) {
+      setHealthTestResult("Health check failed");
+    } finally {
+      setHealthTesting(false);
+    }
   };
 
   const saveThinkingConfig = async (mode) => {
@@ -1560,6 +1606,36 @@ export default function ProviderDetailPage() {
                   )}
                 </>
               )}
+              {/* Model health (per-provider, conservative defaults: all off) */}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-text-muted font-medium">Auto-discover</span>
+                <Toggle
+                  checked={providerHealth.autoDiscover}
+                  onChange={(v) => saveProviderHealth({ ...providerHealth, autoDiscover: !!v })}
+                />
+                <span className="text-xs text-text-muted font-medium">Test models</span>
+                <Toggle
+                  checked={providerHealth.testModels}
+                  onChange={(v) => saveProviderHealth({ ...providerHealth, testModels: !!v })}
+                />
+                <span className="text-xs text-text-muted font-medium">Include free</span>
+                <Toggle
+                  checked={providerHealth.includeFree}
+                  onChange={(v) => saveProviderHealth({ ...providerHealth, includeFree: !!v })}
+                />
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon="sync"
+                  onClick={handleHealthTestNow}
+                  disabled={healthTesting}
+                >
+                  {healthTesting ? "Testing..." : "Test now"}
+                </Button>
+                {healthTestResult && (
+                  <span className="text-xs text-text-muted">{healthTestResult}</span>
+                )}
+              </div>
               {/* Round Robin toggle */}
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs text-text-muted font-medium">Round Robin</span>

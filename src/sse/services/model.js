@@ -88,6 +88,25 @@ export async function getComboModels(modelStr) {
 
   const combo = await getComboByName(modelStr);
   if (combo && combo.models && combo.models.length > 0) {
+    // Managed combos follow durable availability without manual edits:
+    // skip candidates blocked on every known account, preserve preference
+    // order, never strand the combo (fail-open keeps the original list).
+    // Manual combos are returned untouched.
+    if (combo.kind === "managed") {
+      try {
+        const { filterComboCandidates } = await import("@/lib/modelHealth/service.js");
+        const { models, skipped } = await filterComboCandidates(combo.models);
+        if (skipped.length > 0) {
+          try {
+            const { default: log } = await import("../utils/logger.js");
+            log.info("COMBO", `managed ${modelStr}: skipped ${skipped.length} blocked (${skipped.map((s) => s.model).join(", ")})`);
+          } catch { /* logging is best-effort */ }
+        }
+        return models;
+      } catch {
+        return combo.models;
+      }
+    }
     return combo.models;
   }
   return null;

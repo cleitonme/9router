@@ -1,7 +1,7 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
-import { MAX_RATE_LIMIT_COOLDOWN_MS, ACCOUNT_INVALID_COOLDOWN_MS, QUOTA_EXHAUSTED_DEFAULT_MS } from "open-sse/config/errorConfig.js";
+import { MAX_RATE_LIMIT_COOLDOWN_MS, ACCOUNT_INVALID_COOLDOWN_MS, QUOTA_EXHAUSTED_DEFAULT_MS, PAYMENT_REQUIRED_COOLDOWN_MS, MODEL_SKIP_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { classifyError } from "open-sse/utils/classifyError.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { getAntigravityQuotaCache } from "./antigravityQuota.js";
@@ -278,6 +278,44 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     cooldownMs = ACCOUNT_INVALID_COOLDOWN_MS;
     newBackoffLevel = 0;
     lockModel = null;
+  } else if (classification?.type === "payment_required") {
+    // 402 / insufficient-balance / free-plan exclusion: suspend ONLY this
+    // account. Never mark the model dead globally — other accounts may pay.
+    shouldFallback = true;
+    const precise = resetsAtMs && resetsAtMs > Date.now() ? resetsAtMs - Date.now()
+      : (classification?.retryAfterMs && classification.retryAfterMs > Date.now() ? classification.retryAfterMs - Date.now() : PAYMENT_REQUIRED_COOLDOWN_MS);
+    cooldownMs = precise;
+    newBackoffLevel = 0;
+    lockModel = null;
+  } else if (classification?.type === "model_retired" || (classification?.type === "model_not_found" && classification?.scope !== "account") || classification?.type === "route_incompatible") {
+    // Dead/unknown model or incompatible route: the ACCOUNT is healthy, so
+    // never set testStatus=unavailable and never take a long lock. Write a
+    // short per-model skip (fail-open) and let the combo advance; the durable
+    // unavailable_provider state is recorded in kv modelHealth by the caller.
+    shouldFallback = true;
+    cooldownMs = MODEL_SKIP_COOLDOWN_MS;
+    newBackoffLevel = 0;
+    try {
+      const lockUpdate = buildModelLockUpdate(model, cooldownMs);
+      await updateProviderConnection(connectionId, { ...lockUpdate });
+    } catch { /* fail-open: skipping the lock must not break fallback */ }
+    try {
+      const { recordModelHealth } = await import("@/lib/modelHealth/service.js");
+      await recordModelHealth({
+        connectionId, provider, model,
+        ok: false, statusCode: status,
+        reason: classification?.type || "model_unavailable",
+        scope: "model",
+        errorText: typeof errorText === "string" ? errorText.slice(0, 300) : null,
+      });
+    } catch { /* fail-open: kv write must never break routing */ }
+    return { shouldFallback: true, cooldownMs, classification };
+  } else if (classification?.type === "model_not_found" && classification?.scope === "account") {
+    // Model exists but is not enabled for THIS account: account-scoped skip.
+    shouldFallback = true;
+    cooldownMs = MODEL_SKIP_COOLDOWN_MS;
+    newBackoffLevel = 0;
+    lockModel = model;
   } else if (classification?.type === "quota_exhausted") {
     // Daily/free quota: per-model lock until reset. Never truncate quota resets.
     shouldFallback = true;

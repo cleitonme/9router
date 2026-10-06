@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import {
   getProviderConnections,
   updateProviderConnection,
+  getAllModelHealth,
+  removeModelHealthEntry,
 } from "@/lib/localDb";
 
 const MODEL_LOCK_PREFIX = "modelLock_";
@@ -50,6 +52,36 @@ export async function GET() {
       }
     }
 
+    // Durable per-account/per-model health (kv scope "modelHealth").
+    // Fail-open: kv errors must not break the availability endpoint.
+    try {
+      const health = (await getAllModelHealth()) || {};
+      const now = Date.now();
+      for (const [key, entry] of Object.entries(health)) {
+        if (!entry || typeof entry !== "object") continue;
+        if (entry.status === "active") continue;
+        if (entry.nextRetry && new Date(entry.nextRetry).getTime() <= now) continue;
+        models.push({
+          provider: entry.provider || null,
+          model: entry.model || "__all",
+          status: entry.status || "cooldown",
+          reason: entry.reason || null,
+          scope: entry.scope || null,
+          statusCode: entry.statusCode ?? null,
+          lastCheck: entry.lastCheck || null,
+          nextRetry: entry.nextRetry || null,
+          consecutiveFailures: entry.consecutiveFailures || 0,
+          connectionId: entry.connectionId || null,
+          connectionName:
+            (connections.find((c) => c.id === entry.connectionId)?.name ||
+              connections.find((c) => c.id === entry.connectionId)?.email ||
+              entry.connectionId) || null,
+          lastError: entry.lastError || null,
+          healthKey: key,
+        });
+      }
+    } catch { /* fail-open */ }
+
     return NextResponse.json({
       models,
       unavailableCount: models.length,
@@ -65,7 +97,28 @@ export async function GET() {
 
 export async function POST(request) {
   try {
-    const { action, provider, model } = await request.json();
+    const { action, provider, model, connectionId, healthKey } = await request.json();
+
+    // Manual reactivation of a durable health entry (dashboard button).
+    // Removes the kv record so the candidate is eligible again immediately.
+    if (action === "clearHealth") {
+      if (!healthKey && (!provider || !model)) {
+        return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+      }
+      const { modelHealthKey } = await import("@/lib/localDb");
+      const keys = [];
+      if (healthKey) {
+        keys.push(healthKey);
+      } else {
+        const connections = await getProviderConnections({ provider });
+        for (const c of connections) {
+          if (connectionId && c.id !== connectionId) continue;
+          keys.push(modelHealthKey({ connectionId: c.id, provider, model }));
+        }
+      }
+      await Promise.all(keys.map((k) => removeModelHealthEntry(k)));
+      return NextResponse.json({ ok: true, cleared: keys.length });
+    }
 
     if (action !== "clearCooldown" || !provider || !model) {
       return NextResponse.json({ error: "Invalid request" }, { status: 400 });
@@ -82,15 +135,23 @@ export async function POST(request) {
             [lockKey]: null,
             ...(connection.testStatus === "unavailable"
               ? {
-                  testStatus: "active",
-                  lastError: null,
-                  lastErrorAt: null,
-                  backoffLevel: 0,
-                }
+                   testStatus: "active",
+                   lastError: null,
+                   lastErrorAt: null,
+                   backoffLevel: 0,
+                 }
               : {}),
           }),
         ),
     );
+
+    // Also clear durable health so manual reactivation is one click.
+    try {
+      const { modelHealthKey } = await import("@/lib/localDb");
+      await Promise.all(
+        connections.map((c) => removeModelHealthEntry(modelHealthKey({ connectionId: c.id, provider, model }))),
+      );
+    } catch { /* fail-open */ }
 
     return NextResponse.json({ ok: true });
   } catch (error) {

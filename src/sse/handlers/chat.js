@@ -479,6 +479,31 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       continue;
     }
 
+    // Billing / plan / balance (402, insufficient balance, free-plan
+    // exclusion): suspend ONLY this account, keep the model eligible elsewhere.
+    if (ctype === "payment_required" || (ctype === "model_not_found" && classification?.scope === "account")) {
+      const r = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, null, { bodyJson: result.bodyJson, headers: result.response?.headers });
+      const cd = r?.cooldownMs ? Math.round(r.cooldownMs / 1000) : "?";
+      log.warn("QUOTA", `${provider} model=${model} account=${account} reason=payment_required status=${result.status} action=lock_account cooldown=${cd}s action=next_account request_id=${reqId}`);
+      excludeConnectionIds.add(credentials.connectionId);
+      lastError = result.error;
+      lastStatus = result.status;
+      lastHeaders = upstreamResponseHeaders(result.response?.headers);
+      retryCount += 1;
+      continue;
+    }
+
+    // Dead/unknown model or incompatible route: the account is healthy.
+    // Record once and leave the model entirely — never fan out across every
+    // account burning each with a lock for a model that does not exist.
+    if (ctype === "model_retired" || ctype === "route_incompatible" || (ctype === "model_not_found" && classification?.scope !== "account")) {
+      try {
+        await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, null, { bodyJson: result.bodyJson, headers: result.response?.headers });
+      } catch { /* fail-open */ }
+      log.warn("COMBO", `${provider} model=${model} reason=${ctype} status=${result.status} action=next_model request_id=${reqId}`);
+      return result.response;
+    }
+
     // Daily/free quota: long model lock, skip account, next model when all spent.
     if (ctype === "quota_exhausted") {
       let preciseMs = null;
