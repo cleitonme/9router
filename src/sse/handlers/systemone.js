@@ -6,8 +6,14 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { getSettings } from "@/lib/localDb";
-import { getModelInfo } from "../services/model.js";
+import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleSystemoneCore } from "open-sse/handlers/systemoneCore.js";
+import {
+  resolveSystemoneTargets,
+  buildSystemoneSuccessEnvelope,
+  buildSystemoneFailureEnvelope,
+  systemoneEnvelopeResponse,
+} from "open-sse/services/systemoneRouting.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
@@ -17,6 +23,14 @@ import { saveRequestUsage } from "@/lib/usageDb.js";
 /**
  * Handle System One (Jev) decision requests for the Next.js server.
  * Follows the same auth + account-fallback pattern as handleEmbeddings.
+ *
+ * Modes:
+ * - single (legacy): `{ "model": "provider/id", ... }` → native upstream
+ *   JSON passed through byte-identical (no envelope).
+ * - combo/auto: `{ "mode": "combo"|"auto", "models": [...], ... }` or
+ *   `{ "model": "auto", "models": [...], ... }` → sequential fallback by
+ *   list order (v1 scope). A provider error never aborts the combo; the
+ *   winner is returned inside a routing envelope.
  *
  * @param {Request} request
  */
@@ -67,6 +81,33 @@ export async function handleSystemone(request) {
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing required field: questions");
   }
 
+  // v1: strategy/criteria fields are accepted but treated as sequential
+  // fallback — logged so clients can send the full contract safely.
+  const strategy = body?.combo?.strategy || body?.routing?.strategy || null;
+  if (strategy && strategy !== "fallback") {
+    log.debug("SYSTEMONE", `Strategy "${strategy}" accepted as sequential fallback (v1 scope)`);
+  }
+
+  // Resolve single vs combo/auto targets (combo names expand via localDb).
+  let targets;
+  try {
+    targets = await resolveSystemoneTargets(body, (name) => getComboModels(name));
+  } catch (err) {
+    if (err?.code === "MISSING_MODELS") {
+      log.warn("SYSTEMONE", err.message);
+      return errorResponse(HTTP_STATUS.BAD_REQUEST, err.message);
+    }
+    throw err;
+  }
+
+  if (targets.mode === "single") {
+    return handleSingleSystemone({ body, modelStr, apiKey, url });
+  }
+
+  return handleMultiSystemone({ body, targets, apiKey, url });
+}
+
+async function handleSingleSystemone({ body, modelStr, apiKey, url }) {
   const modelInfo = await getModelInfo(modelStr);
   if (!modelInfo.provider) {
     log.warn("SYSTEMONE", "Invalid model format", { model: modelStr });
@@ -81,7 +122,139 @@ export async function handleSystemone(request) {
     log.info("ROUTING", `Provider: ${provider}, Model: ${model}`);
   }
 
-  // Credential + fallback loop (mirrors handleEmbeddings)
+  const result = await trySingleSystemoneModel({ body, modelStr, provider, model });
+
+  if (result.ok) {
+    if (result.usage) {
+      saveRequestUsage({
+        provider,
+        model,
+        connectionId: result.connectionId,
+        apiKey,
+        endpoint: url.pathname,
+        tokens: {
+          ...result.usage,
+          total_tokens: result.usage.prompt_tokens + result.usage.completion_tokens,
+        },
+        status: "success",
+      }).catch(() => {});
+    }
+    return result.response;
+  }
+
+  return result.response;
+}
+
+async function handleMultiSystemone({ body, targets, apiKey, url }) {
+  const { mode, models } = targets;
+  log.info("SYSTEMONE", `${mode} with ${models.length} models (strategy: fallback, sequential)`);
+
+  // Multitenant whitelist (mirrors handleChat): filter candidates per user.
+  let candidates = models;
+  if (apiKey) {
+    try {
+      const { resolveApiKeyUser } = await import("@/sse/services/auth.js");
+      const tenantUser = await resolveApiKeyUser(apiKey);
+      const allowedModels = tenantUser?.allowedModels || [];
+      const allowedCombos = tenantUser?.allowedCombos || [];
+      if (tenantUser && (allowedModels.length > 0 || allowedCombos.length > 0)) {
+        const { getComboById, getComboByName } = await import("@/lib/localDb");
+        const permitted = [];
+        for (const m of models) {
+          if (allowedModels.includes(m)) {
+            permitted.push(m);
+            continue;
+          }
+          let ok = false;
+          for (const comboRef of allowedCombos) {
+            const comboObj = (await getComboById(comboRef)) || (await getComboByName(comboRef));
+            if (comboObj && (comboObj.name === m || comboObj.id === m || (Array.isArray(comboObj.models) && comboObj.models.includes(m)))) {
+              ok = true;
+              break;
+            }
+          }
+          if (ok) permitted.push(m);
+          else log.warn("SYSTEMONE", `Model "${m}" not allowed for user ${tenantUser.username}, skipping`);
+        }
+        if (permitted.length === 0) {
+          log.warn("SYSTEMONE", `No allowed models for user ${tenantUser.username} in ${mode} list`);
+          return errorResponse(HTTP_STATUS.FORBIDDEN, "None of the requested models are allowed for your account.");
+        }
+        candidates = permitted;
+      }
+    } catch {
+      // fail-open: if tenant resolution fails, try the full list
+    }
+  }
+
+  const attempted = [];
+  const errors = [];
+
+  for (let i = 0; i < candidates.length; i++) {
+    const candidateStr = candidates[i];
+    attempted.push(candidateStr);
+
+    const modelInfo = await getModelInfo(candidateStr);
+    if (!modelInfo.provider) {
+      const msg = "Invalid model format";
+      log.warn("SYSTEMONE", `${msg}, skipping`, { model: candidateStr });
+      errors.push({ model: candidateStr, status: HTTP_STATUS.BAD_REQUEST, message: msg });
+      continue;
+    }
+    const { provider, model } = modelInfo;
+    log.info("SYSTEMONE", `Trying model ${i + 1}/${candidates.length}: ${candidateStr}`);
+
+    const result = await trySingleSystemoneModel({ body, modelStr: candidateStr, provider, model });
+
+    if (result.ok) {
+      if (result.usage) {
+        saveRequestUsage({
+          provider,
+          model,
+          connectionId: result.connectionId,
+          apiKey,
+          endpoint: url.pathname,
+          tokens: {
+            ...result.usage,
+            total_tokens: result.usage.prompt_tokens + result.usage.completion_tokens,
+          },
+          status: "success",
+        }).catch(() => {});
+      }
+      log.info("SYSTEMONE", `${mode} winner: ${candidateStr} (fallback_used=${i > 0})`);
+      return systemoneEnvelopeResponse(
+        buildSystemoneSuccessEnvelope({
+          data: result.data,
+          selectedModel: candidateStr,
+          provider,
+          mode,
+          fallbackUsed: i > 0,
+          attempted,
+          usage: result.usage,
+        })
+      );
+    }
+
+    // A provider error never aborts the combo — record and try next.
+    errors.push({ model: candidateStr, status: result.status, message: result.error });
+    log.warn("SYSTEMONE", `Model ${candidateStr} failed (${result.status}), trying next`, { error: result.error });
+  }
+
+  const lastStatus = errors.length > 0 ? errors[errors.length - 1].status : HTTP_STATUS.SERVICE_UNAVAILABLE;
+  const status = lastStatus && lastStatus >= 400 && lastStatus < 600 ? lastStatus : HTTP_STATUS.SERVICE_UNAVAILABLE;
+  log.warn("SYSTEMONE", `All ${candidates.length} ${mode} models failed`);
+  return systemoneEnvelopeResponse(
+    buildSystemoneFailureEnvelope({ mode, attempted, errors }),
+    status
+  );
+}
+
+/**
+ * Try one provider/model with the existing credential + account-fallback loop.
+ * Never throws for upstream failures — returns `{ ok: false, ... }` so the
+ * caller (single or combo) can decide what to do next.
+ */
+async function trySingleSystemoneModel({ body, modelStr, provider, model }) {
   const excludeConnectionIds = new Set();
   let lastError = null;
   let lastStatus = null;
@@ -95,14 +268,29 @@ export async function handleSystemone(request) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("SYSTEMONE", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
-        return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
+        return {
+          ok: false,
+          status,
+          error: `[${provider}/${model}] ${errorMsg}`,
+          response: unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman),
+        };
       }
       if (excludeConnectionIds.size === 0) {
         log.error("AUTH", `No credentials for provider: ${provider}`);
-        return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`);
+        return {
+          ok: false,
+          status: HTTP_STATUS.BAD_REQUEST,
+          error: `No credentials for provider: ${provider}`,
+          response: errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`),
+        };
       }
       log.warn("SYSTEMONE", "No more accounts available", { provider });
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+      return {
+        ok: false,
+        status: lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE,
+        error: lastError || "All accounts unavailable",
+        response: errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable"),
+      };
     }
 
     log.info("AUTH", `\x1b[32mUsing ${provider} account: ${credentials.connectionName}\x1b[0m`);
@@ -110,7 +298,7 @@ export async function handleSystemone(request) {
     const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
 
     const result = await handleSystemoneCore({
-      body,
+      body: { ...body, model: modelStr },
       modelInfo: { provider, model },
       credentials: refreshedCredentials,
       log,
@@ -120,21 +308,13 @@ export async function handleSystemone(request) {
     });
 
     if (result.success) {
-      if (result.usage) {
-        saveRequestUsage({
-          provider,
-          model,
-          connectionId: credentials.connectionId,
-          apiKey,
-          endpoint: url.pathname,
-          tokens: {
-            ...result.usage,
-            total_tokens: result.usage.prompt_tokens + result.usage.completion_tokens,
-          },
-          status: "success",
-        }).catch(() => {});
-      }
-      return result.response;
+      return {
+        ok: true,
+        usage: result.usage,
+        data: result.data,
+        connectionId: credentials.connectionId,
+        response: result.response,
+      };
     }
 
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
@@ -144,9 +324,10 @@ export async function handleSystemone(request) {
       excludeConnectionIds.add(credentials.connectionId);
       lastError = result.error;
       lastStatus = result.status;
+      lastResponse = result.response;
       continue;
     }
 
-    return result.response;
+    return { ok: false, status: result.status, error: result.error, response: result.response };
   }
 }

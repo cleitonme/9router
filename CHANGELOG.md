@@ -1,3 +1,8 @@
+# Unreleased
+
+## Features
+- **SystemOne**: add combo/auto sequential fallback to `POST /v1/systemone` (`mode: combo|auto`, `model: auto` + `models[]`/`routing.models[]`, named-combo expansion) with routing envelope (`selected_model`, `provider`, `fallback_used`, `attempted`, `usage`); legacy single-`model` pass-through unchanged
+
 # v0.5.95 (2026-10-01)
 
 ## Features

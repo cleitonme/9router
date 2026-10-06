@@ -2,13 +2,18 @@ import { createErrorResult, parseUpstreamError, formatProviderError } from "../u
 import { HTTP_STATUS, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { PROVIDER_MEDIA } from "../providers/index.js";
 import { generateSessionId } from "../executors/opencode-zen.js";
+import { sanitizeSystemoneUpstreamBody } from "../services/systemoneRouting.js";
 
 /**
  * Core System One (Jev) handler — native decision payload pass-through.
  * URL/headers come from the registry's systemoneConfig; body and JSON response
  * are forwarded untouched (decision models have no chat translation layer).
  *
- * @returns {Promise<{ success: boolean, response: Response, usage?: object, status?: number, error?: string }>}
+ * Gateway-only routing fields (`models`, `mode`, `routing`, `combo`) are
+ * stripped before forwarding so upstream lanes only see the native
+ * model/state/questions payload.
+ *
+ * @returns {Promise<{ success: boolean, response: Response, data?: object, usage?: object, status?: number, error?: string }>}
  */
 export async function handleSystemoneCore({
   body,
@@ -44,7 +49,7 @@ export async function handleSystemoneCore({
     // Zen lanes expect the official client session header on every request.
     "x-opencode-session": generateSessionId(),
   };
-  const requestBody = { ...body, model };
+  const requestBody = sanitizeSystemoneUpstreamBody(body, model);
 
   log?.debug?.("SYSTEMONE", `${provider.toUpperCase()} | ${model}`);
 
@@ -83,6 +88,7 @@ export async function handleSystemoneCore({
   const usage = responseBody?.usage;
   return {
     success: true,
+    data: responseBody,
     usage: usage
       ? { prompt_tokens: usage.input_tokens || 0, completion_tokens: usage.output_tokens || 0 }
       : null,
