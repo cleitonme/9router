@@ -103,10 +103,10 @@ export async function resolveConnectionProxyConfig(
 
       if (isValidPool) {
         /**
-         * Vercel/Cloudflare relay proxies use base URL rewriting
+         * Vercel/Cloudflare/Deno/Netlify relay proxies use base URL rewriting
          * instead of HTTP_PROXY environment variables.
          */
-        if (proxyPool.type === "vercel" || proxyPool.type === "cloudflare" || proxyPool.type === "deno") {
+        if (proxyPool.type === "vercel" || proxyPool.type === "cloudflare" || proxyPool.type === "deno" || proxyPool.type === "netlify") {
           return {
             source: proxyPool.type,
 
@@ -156,7 +156,7 @@ export async function resolveConnectionProxyConfig(
       const defaultNoProxy = normalizeString(defaultPool?.noProxy);
 
       if (defaultPool && defaultPool.isActive === true && defaultProxyUrl) {
-        if (defaultPool.type === "vercel" || defaultPool.type === "cloudflare" || defaultPool.type === "deno") {
+        if (defaultPool.type === "vercel" || defaultPool.type === "cloudflare" || defaultPool.type === "deno" || defaultPool.type === "netlify") {
           return {
             source: defaultPool.type,
             proxyPoolId: defaultProxyPoolId,
