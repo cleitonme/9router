@@ -15,6 +15,11 @@ import {
   shouldUseSystemoneEnvelope,
   systemoneRoutingHeaders,
   systemoneEnvelopeResponse,
+  filterSystemoneCooling,
+  markSystemoneModelCooling,
+  clearSystemoneModelCooling,
+  isSystemoneModelCooling,
+  getSystemoneCooldownRemaining,
 } from "open-sse/services/systemoneRouting.js";
 import { isGatewayBlocked, isLogicalProviderBlocked } from "open-sse/services/providerLock.js";
 import REGISTRY from "open-sse/providers/registry/index.js";
@@ -229,6 +234,23 @@ async function handleMultiSystemone({ body, targets, apiKey, url }) {
   // as single-model), so clients that only swap the model keep working.
   const wantEnvelope = shouldUseSystemoneEnvelope(body, url?.searchParams);
 
+  // Auto cooldown: skip candidates that recently failed with 429/5xx so a
+  // saturated lane (e.g. oc/jev-1.13-free 429) doesn't burn an upstream call
+  // on every request. Explicit combo lists are never filtered — only
+  // zero-config auto discovery. Fail-open: all-cooling still tries everything.
+  if (autoDiscovered && candidates.length > 0) {
+    const cooling = candidates.filter((c) => isSystemoneModelCooling(c));
+    if (cooling.length > 0 && cooling.length < candidates.length) {
+      for (const s of cooling) {
+        const leftSec = Math.ceil(getSystemoneCooldownRemaining(s) / 1000);
+        log.info("SYSTEMONE", `auto cooldown: skipping ${s} (${leftSec}s left)`);
+      }
+      candidates = filterSystemoneCooling(candidates);
+    } else if (cooling.length === candidates.length) {
+      log.info("SYSTEMONE", "auto cooldown: all candidates cooling, trying full list (fail-open)");
+    }
+  }
+
   for (let i = 0; i < candidates.length; i++) {
     const candidateStr = candidates[i];
     attempted.push(candidateStr);
@@ -246,6 +268,7 @@ async function handleMultiSystemone({ body, targets, apiKey, url }) {
     const result = await trySingleSystemoneModel({ body, modelStr: candidateStr, provider, model });
 
     if (result.ok) {
+      if (autoDiscovered) clearSystemoneModelCooling(candidateStr);
       if (result.usage) {
         saveRequestUsage({
           provider,
@@ -293,6 +316,14 @@ async function handleMultiSystemone({ body, targets, apiKey, url }) {
     }
 
     // A provider error never aborts the combo — record and try next.
+    // Auto lanes also cool down on 429/5xx so the next request skips them.
+    if (autoDiscovered) {
+      const until = markSystemoneModelCooling(candidateStr, result.status);
+      if (until > 0) {
+        const ttlSec = Math.round((until - Date.now()) / 1000);
+        log.info("SYSTEMONE", `auto cooldown: ${candidateStr} cooling for ${ttlSec}s (${result.status})`);
+      }
+    }
     errors.push({ model: candidateStr, status: result.status, message: result.error });
     log.warn("SYSTEMONE", `Model ${candidateStr} failed (${result.status}), trying next`, { error: result.error });
   }
@@ -315,7 +346,6 @@ async function trySingleSystemoneModel({ body, modelStr, provider, model }) {
   const excludeConnectionIds = new Set();
   let lastError = null;
   let lastStatus = null;
-
   while (true) {
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
 
@@ -381,7 +411,6 @@ async function trySingleSystemoneModel({ body, modelStr, provider, model }) {
       excludeConnectionIds.add(credentials.connectionId);
       lastError = result.error;
       lastStatus = result.status;
-      lastResponse = result.response;
       continue;
     }
 

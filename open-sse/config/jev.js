@@ -33,5 +33,24 @@ export const JEV_STATE_CHAR_BUDGET = 4000;
 export const JEV_TIMEOUT_MS = 3000;
 export const JEV_BREAKER_COOLDOWN_MS = 30000;
 
+// SystemOne auto (POST /v1/systemone, model:"auto") per-model cooldown.
+// A candidate that fails with 429 stays out for 60s, 502/503/504/529 for 30s.
+// RAM-only, per process (same scope as providerLock.js). Success clears it.
+export const SYSTEMONE_COOLDOWN_429_MS = 60000;
+export const SYSTEMONE_COOLDOWN_5XX_MS = 30000;
+
+// Explicit auto-discovery try order (alias/model strings). Applied as a final
+// rank over the free-first + priority sort in discoverSystemoneModels, so the
+// global registry `priority` (shared with chat/LLM) is left untouched.
+// Unknown future lanes keep relative order at the end (fail-open).
+export const SYSTEMONE_AUTO_ORDER = [
+  "oc/jev-1.13-free",
+  "openrouter/typesafe/jev-1.13",
+  "cloudflare-ai/@cf/cloudflare/clef-flash",
+  "v1m/rev-latest",
+  "ocz/jev-1.13-free",
+  "ts/jev-latest",
+];
+
 // Below this confidence, preserve the combo's existing order.
 export const JEV_MIN_CONFIDENCE = 0.5;

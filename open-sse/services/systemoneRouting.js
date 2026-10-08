@@ -7,8 +7,85 @@
  * without breaking. No parallel fan-out, no judge/consensus in v1.
  */
 
+import {
+  SYSTEMONE_AUTO_ORDER,
+  SYSTEMONE_COOLDOWN_429_MS,
+  SYSTEMONE_COOLDOWN_5XX_MS,
+} from "../config/jev.js";
+
+// Re-export so handler/tests share one source without importing config directly.
+export { SYSTEMONE_COOLDOWN_429_MS, SYSTEMONE_COOLDOWN_5XX_MS };
+
 export const SYSTEMONE_AUTO_MODEL = "auto";
 const MULTI_MODES = new Set(["combo", "auto"]);
+
+const SYSTEMONE_COOLDOWNABLE_5XX = new Set([502, 503, 504, 529]);
+
+// Per-model auto cooldowns: candidate string -> epoch-ms expiry. RAM-only,
+// per process (same scope as providerLock.js). Expired entries purge lazily.
+const systemoneCooldowns = new Map();
+
+function systemoneCooldownKey(candidate) {
+  return String(candidate || "").toLowerCase();
+}
+
+/** Test/debug hook: clear one candidate cooldown, or all when omitted. */
+export function resetSystemoneCooldowns(candidate) {
+  if (candidate) systemoneCooldowns.delete(systemoneCooldownKey(candidate));
+  else systemoneCooldowns.clear();
+}
+
+/** TTL in ms for a failure status. 429 → long, 502/503/504/529 → short, else 0 (no cooldown). */
+export function systemoneCooldownTtlForStatus(status) {
+  const s = Number(status);
+  if (s === 429) return SYSTEMONE_COOLDOWN_429_MS;
+  if (SYSTEMONE_COOLDOWNABLE_5XX.has(s)) return SYSTEMONE_COOLDOWN_5XX_MS;
+  return 0;
+}
+
+/** Mark a candidate as cooling down. Returns expiry epoch-ms, or 0 when the status is not cooldownable. */
+export function markSystemoneModelCooling(candidate, status, now = Date.now()) {
+  const ttl = systemoneCooldownTtlForStatus(status);
+  if (!candidate || !(ttl > 0)) return 0;
+  const until = now + ttl;
+  systemoneCooldowns.set(systemoneCooldownKey(candidate), { until, status: Number(status) });
+  return until;
+}
+
+/** Remaining cooldown ms for a candidate, or 0 when not cooling. */
+export function getSystemoneCooldownRemaining(candidate, now = Date.now()) {
+  if (!candidate) return 0;
+  const key = systemoneCooldownKey(candidate);
+  const entry = systemoneCooldowns.get(key);
+  if (!entry) return 0;
+  if (entry.until <= now) {
+    systemoneCooldowns.delete(key);
+    return 0;
+  }
+  return entry.until - now;
+}
+
+/** True when the candidate is currently cooling down. */
+export function isSystemoneModelCooling(candidate, now = Date.now()) {
+  return getSystemoneCooldownRemaining(candidate, now) > 0;
+}
+
+/** Clear a candidate cooldown (call on success). */
+export function clearSystemoneModelCooling(candidate) {
+  if (!candidate) return;
+  systemoneCooldowns.delete(systemoneCooldownKey(candidate));
+}
+
+/**
+ * Filter cooling candidates out of an auto try-list.
+ * Never returns [] from a non-empty input — when everything is cooling,
+ * the full list is returned so the request still tries (fail-open).
+ */
+export function filterSystemoneCooling(candidates, now = Date.now()) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return [];
+  const fresh = candidates.filter((c) => !isSystemoneModelCooling(c, now));
+  return fresh.length > 0 ? fresh : [...candidates];
+}
 
 /**
  * Strip gateway-only routing fields before forwarding upstream.
@@ -221,5 +298,19 @@ export async function discoverSystemoneModels({ entries, hasCredentials, isBlock
   }
   free.sort((a, b) => a.priority - b.priority);
   configured.sort((a, b) => a.priority - b.priority);
-  return [...free, ...configured].map((x) => x.candidate);
+  const merged = [...free, ...configured].map((x) => x.candidate);
+  // Explicit SystemOne auto order (config/jev.js): rank known lanes first,
+  // keep unknown future lanes in relative order at the end (fail-open).
+  const rank = new Map(
+    (Array.isArray(SYSTEMONE_AUTO_ORDER) ? SYSTEMONE_AUTO_ORDER : []).map((m, i) => [String(m).toLowerCase(), i])
+  );
+  return merged
+    .map((candidate, index) => ({ candidate, index }))
+    .sort((a, b) => {
+      const ra = rank.has(a.candidate.toLowerCase()) ? rank.get(a.candidate.toLowerCase()) : Infinity;
+      const rb = rank.has(b.candidate.toLowerCase()) ? rank.get(b.candidate.toLowerCase()) : Infinity;
+      if (ra !== rb) return ra - rb;
+      return a.index - b.index;
+    })
+    .map((x) => x.candidate);
 }

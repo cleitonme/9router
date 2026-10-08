@@ -9,7 +9,19 @@ import {
   pickSystemoneDefaultModel,
   shouldUseSystemoneEnvelope,
   systemoneRoutingHeaders,
+  markSystemoneModelCooling,
+  isSystemoneModelCooling,
+  getSystemoneCooldownRemaining,
+  filterSystemoneCooling,
+  clearSystemoneModelCooling,
+  resetSystemoneCooldowns,
+  systemoneCooldownTtlForStatus,
 } from "open-sse/services/systemoneRouting.js";
+import {
+  SYSTEMONE_AUTO_ORDER,
+  SYSTEMONE_COOLDOWN_429_MS,
+  SYSTEMONE_COOLDOWN_5XX_MS,
+} from "open-sse/config/jev.js";
 import { handleSystemoneCore } from "open-sse/handlers/systemoneCore.js";
 
 afterEach(() => {
@@ -201,6 +213,115 @@ describe("systemone auto discovery (zero-config)", () => {
     expect(pickSystemoneDefaultModel(["jev-1.13", "jev-1.13-free"])).toBe("jev-1.13-free");
     expect(pickSystemoneDefaultModel(["rev-latest", "v1m-decision-engine"])).toBe("rev-latest");
     expect(pickSystemoneDefaultModel([])).toBeNull();
+  });
+
+  it("applies the explicit SYSTEMONE_AUTO_ORDER (cloudflare before v1m, ts last)", async () => {
+    const full = [
+      {
+        id: "opencode",
+        alias: "oc",
+        priority: 40,
+        noAuth: true,
+        systemoneConfig: { baseUrl: "https://opencode.ai/zen/v1/systemone" },
+        models: [{ id: "jev-1.13-free", kind: "systemone" }],
+      },
+      {
+        id: "openrouter",
+        alias: "openrouter",
+        priority: 10,
+        systemoneConfig: { baseUrl: "https://openrouter.ai/api/v1/systemone" },
+        models: [{ id: "typesafe/jev-1.13", kind: "systemone" }],
+      },
+      {
+        id: "cloudflare-ai",
+        alias: "cloudflare-ai",
+        priority: 60,
+        systemoneConfig: { baseUrl: "https://x/run/{model}" },
+        models: [{ id: "@cf/cloudflare/clef-flash", kind: "systemone" }],
+      },
+      {
+        id: "v1m",
+        alias: "v1m",
+        priority: 45,
+        systemoneConfig: { baseUrl: "https://v1m.ir/v1/systemone" },
+        models: [{ id: "rev-latest", kind: "systemone" }],
+      },
+      {
+        id: "opencode-zen",
+        alias: "ocz",
+        priority: 205,
+        systemoneConfig: { baseUrl: "https://opencode.ai/zen/v1/systemone" },
+        models: [{ id: "jev-1.13-free", kind: "systemone" }],
+      },
+      {
+        id: "typesafe",
+        alias: "ts",
+        priority: 50,
+        systemoneConfig: { baseUrl: "https://api.typesafe.ai/v1/systemone" },
+        models: [{ id: "jev-latest", kind: "systemone" }],
+      },
+    ];
+    const models = await discoverSystemoneModels({
+      entries: full,
+      hasCredentials: async () => true,
+      isBlocked: () => false,
+    });
+    expect(models).toEqual([...SYSTEMONE_AUTO_ORDER]);
+  });
+});
+
+describe("systemone auto cooldown", () => {
+  afterEach(() => {
+    resetSystemoneCooldowns();
+  });
+
+  it("maps 429 to the long cooldown and 5xx to the short one", () => {
+    expect(systemoneCooldownTtlForStatus(429)).toBe(SYSTEMONE_COOLDOWN_429_MS);
+    expect(systemoneCooldownTtlForStatus(503)).toBe(SYSTEMONE_COOLDOWN_5XX_MS);
+    expect(systemoneCooldownTtlForStatus(502)).toBe(SYSTEMONE_COOLDOWN_5XX_MS);
+    expect(systemoneCooldownTtlForStatus(400)).toBe(0);
+    expect(systemoneCooldownTtlForStatus(401)).toBe(0);
+    expect(systemoneCooldownTtlForStatus(500)).toBe(0);
+  });
+
+  it("marks 429 candidates as cooling and expires them", () => {
+    const t0 = 1_000_000;
+    const until = markSystemoneModelCooling("oc/jev-1.13-free", 429, t0);
+    expect(until).toBe(t0 + SYSTEMONE_COOLDOWN_429_MS);
+    expect(isSystemoneModelCooling("oc/jev-1.13-free", t0 + 1000)).toBe(true);
+    expect(getSystemoneCooldownRemaining("oc/jev-1.13-free", t0 + 1000)).toBe(
+      SYSTEMONE_COOLDOWN_429_MS - 1000
+    );
+    // Expired → fresh again
+    expect(isSystemoneModelCooling("oc/jev-1.13-free", until + 1)).toBe(false);
+    expect(getSystemoneCooldownRemaining("oc/jev-1.13-free", until + 1)).toBe(0);
+  });
+
+  it("does not cool down on config errors (400/401)", () => {
+    expect(markSystemoneModelCooling("oc/jev-1.13-free", 400, 1000)).toBe(0);
+    expect(isSystemoneModelCooling("oc/jev-1.13-free", 1001)).toBe(false);
+  });
+
+  it("filters cooling candidates but fails open when all are cooling", () => {
+    const t0 = 2_000_000;
+    const list = ["oc/jev-1.13-free", "openrouter/typesafe/jev-1.13"];
+    markSystemoneModelCooling("oc/jev-1.13-free", 429, t0);
+    expect(filterSystemoneCooling(list, t0 + 1000)).toEqual(["openrouter/typesafe/jev-1.13"]);
+    markSystemoneModelCooling("openrouter/typesafe/jev-1.13", 503, t0);
+    // All cooling → full list (fail-open), never []
+    expect(filterSystemoneCooling(list, t0 + 1000)).toEqual(list);
+  });
+
+  it("clears cooldown on success", () => {
+    markSystemoneModelCooling("oc/jev-1.13-free", 429, 3000);
+    expect(isSystemoneModelCooling("oc/jev-1.13-free", 3001)).toBe(true);
+    clearSystemoneModelCooling("oc/jev-1.13-free");
+    expect(isSystemoneModelCooling("oc/jev-1.13-free", 3002)).toBe(false);
+  });
+
+  it("matches keys case-insensitively", () => {
+    markSystemoneModelCooling("OC/jev-1.13-free", 429, 4000);
+    expect(isSystemoneModelCooling("oc/jev-1.13-free", 4001)).toBe(true);
   });
 });
 
