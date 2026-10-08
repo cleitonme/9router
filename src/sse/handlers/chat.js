@@ -568,8 +568,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       continue;
     }
 
-    // Temporary overload: max 1 backoff (1–5s + Retry-After) then next route.
-    if (ctype === "upstream_overload" || ctype === "upstream_rate_limit" || ctype === "concurrency_limit" || ctype === "gateway_rate_limit" || ctype === "timeout" || ctype === "server_error") {
+    // Temporary overload — or an empty upstream success (200 with zero content):
+    // max 1 backoff (1–5s + Retry-After) then next route.
+    if (ctype === "upstream_overload" || ctype === "upstream_rate_limit" || ctype === "concurrency_limit" || ctype === "gateway_rate_limit" || ctype === "timeout" || ctype === "server_error" || ctype === "empty_response") {
       let delayMs = upstreamBackoffMs();
       try {
         const h = parseResetsAtMsFromHeaders(result.response?.headers);

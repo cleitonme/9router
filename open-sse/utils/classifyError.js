@@ -21,6 +21,7 @@ export const CLASSIFIED_TYPES = {
   GATEWAY_RATE_LIMIT: "gateway_rate_limit",
   TIMEOUT: "timeout",
   SERVER_ERROR: "server_error",
+  EMPTY_RESPONSE: "empty_response",
   INVALID_REQUEST: "invalid_request",
   UNKNOWN: "unknown",
 };
@@ -134,6 +135,18 @@ export function classifyError({ status, bodyText = "", bodyJson = null, headers 
   const parsed = bodyJson || tryParseJson(text);
   const env = extractUpstreamEnvelope(parsed, text);
   const retryAfterMs = headers ? headerRetryAfterMs(headers) : null;
+
+  // 0) Empty upstream success: HTTP 200 with zero content/reasoning/tool
+  // chunks. Transient model-side failure — the combo must advance to the
+  // next model, never lock the (healthy) account long-term.
+  if (lower.includes("empty_upstream_response")) {
+    return {
+      type: CLASSIFIED_TYPES.EMPTY_RESPONSE, scope: CLASSIFIED_SCOPES.MODEL,
+      retryable: true, maxRetries: 0, retryAfterMs: retryAfterMs || null,
+      upstreamProvider: env.providerName || null, limitSource: env.limitSource,
+      remedyHint: env.remedyHint, isByok: env.isByok, current: env.current, limit: env.limit,
+    };
+  }
 
   // 1) Kilo/upstream envelope wins: never report bare "kilo-gateway".
   if (env.hasEnvelope || env.providerName) {

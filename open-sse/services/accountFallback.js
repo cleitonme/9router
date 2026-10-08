@@ -55,7 +55,7 @@ export function checkFallbackError(status, errorText, backoffLevel = 0, provider
           : (c.retryAfterMs && c.retryAfterMs > Date.now() ? c.retryAfterMs - Date.now() : QUOTA_EXHAUSTED_DEFAULT_MS);
         return { shouldFallback: true, cooldownMs: precise, classification: c };
       }
-      if (c.type === "upstream_overload" || c.type === "upstream_rate_limit" || c.type === "concurrency_limit" || c.type === "gateway_rate_limit" || c.type === "timeout" || c.type === "server_error") {
+      if (c.type === "upstream_overload" || c.type === "upstream_rate_limit" || c.type === "concurrency_limit" || c.type === "gateway_rate_limit" || c.type === "timeout" || c.type === "server_error" || c.type === "empty_response") {
         // Short DB cooldown only; the RAM providerLock carries the real grouping.
         // Honor Retry-After when present but cap it so overload never parks an account for hours.
         const raMs = extra?.retryAfterMs && extra.retryAfterMs > Date.now()

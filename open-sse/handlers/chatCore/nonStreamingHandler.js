@@ -12,6 +12,7 @@ import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, sav
 import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
 import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
+import { isEmptyCompletionBody, EMPTY_UPSTREAM_MARKER } from "../../utils/streamGate.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
 
 function parseToolArguments(value) {
@@ -377,6 +378,28 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   }
 
   reqLogger.logConvertedResponse(translatedResponse);
+
+  // Empty-upstream guard (non-streaming twin of the streaming gate): a 200
+  // with zero text/reasoning/tool content must fall back to the next combo
+  // model instead of reaching the client as a null body.
+  if (isEmptyCompletionBody(translatedResponse)) {
+    const msg = `[${EMPTY_UPSTREAM_MARKER}] ${provider}/${model} returned 200 with an empty completion (no content, reasoning or tool calls)`;
+    appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
+    return createErrorResult(
+      HTTP_STATUS.BAD_GATEWAY,
+      msg,
+      undefined,
+      upstreamResponseHeaders(providerResponse.headers),
+      {
+        classification: {
+          type: "empty_response", scope: "model",
+          retryable: true, maxRetries: 0, retryAfterMs: null,
+          upstreamProvider: null, limitSource: null, remedyHint: null, isByok: false,
+          current: null, limit: null,
+        },
+      }
+    );
+  }
 
   const totalLatency = Date.now() - requestStartTime;
   saveRequestDetail(buildRequestDetail({

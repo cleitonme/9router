@@ -3,9 +3,12 @@ import { needsTranslation } from "../../translator/index.js";
 import { createSSETransformStreamWithLogger, createPassthroughStreamWithLogger } from "../../utils/stream.js";
 import { pipeWithDisconnect } from "../../utils/streamHandler.js";
 import { PROVIDERS } from "../../config/providers.js";
-import { HTTP_STATUS, STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig.js";
+import { HTTP_STATUS, STREAM_STALL_TIMEOUT_MS, EMPTY_STREAM_GATE_TIMEOUT_MS } from "../../config/runtimeConfig.js";
 import { buildAbortedResponsesTerminalBytes } from "../../utils/responsesStreamHelpers.js";
 import { buildStreamErrorBytes } from "../../utils/streamHelpers.js";
+import { gateUpstreamStream, EMPTY_UPSTREAM_MARKER } from "../../utils/streamGate.js";
+import { createErrorResult } from "../../utils/error.js";
+import { trackPendingRequest } from "@/lib/usageDb.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
 import { saveRequestDetail } from "@/lib/usageDb.js";
 import { SSE_HEADERS_CORS as SSE_HEADERS } from "../../utils/sseConstants.js";
@@ -87,6 +90,48 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
   }
 
   const transformStream = buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, customToolNames, model, connectionId, body, onStreamComplete, apiKey, credentials });
+
+  // Empty-upstream gate: an upstream that answers 200 with a content-less
+  // stream (zero text/reasoning/tool chunks, OUT 0) must NOT be forwarded as
+  // a clean [DONE] — the client breaks on the null body and, worse, the
+  // combo never advances to the next model. Buffer until the first real
+  // content chunk; empty at EOF becomes a 502 error result so the
+  // account/combo fallback advances. Non-empty replays buffered bytes +
+  // live remainder, so normal streams only pay a first-token delay.
+  // Strict scan only for OpenAI/Claude wire shapes; other upstream formats
+  // are fail-open inside the gate. Gate timeout also fails open.
+  if (targetFormat === FORMATS.OPENAI || targetFormat === FORMATS.CLAUDE) {
+    let gate;
+    try {
+      gate = await gateUpstreamStream(providerResponse, {
+        timeoutMs: EMPTY_STREAM_GATE_TIMEOUT_MS,
+        formatHint: targetFormat,
+        signal: streamController?.signal,
+      });
+    } catch {
+      gate = null;
+    }
+    if (gate?.empty) {
+      const msg = `[${EMPTY_UPSTREAM_MARKER}] ${provider}/${model} returned 200 with an empty stream (no content, reasoning or tool calls)`;
+      if (log?.errorLine) log.errorLine(reqTag, "✗", `EMPTY ${provider}/${model} · ${Date.now() - requestStartTime}ms\n    ${msg}`);
+      streamController?.handleError?.(new Error(msg));
+      trackPendingRequest(model, provider, connectionId, false, true);
+      const classification = {
+        type: "empty_response", scope: "model",
+        retryable: true, maxRetries: 0, retryAfterMs: null,
+        upstreamProvider: null, limitSource: null, remedyHint: null, isByok: false,
+        current: null, limit: null,
+      };
+      return createErrorResult(
+        HTTP_STATUS.BAD_GATEWAY,
+        msg,
+        undefined,
+        upstreamResponseHeaders(providerResponse.headers),
+        { classification },
+      );
+    }
+    if (gate?.response) providerResponse = gate.response;
+  }
 
   // Terminal bytes when the stream aborts after HTTP 200 was already sent, so the
   // client sees a real error instead of a silently truncated stream.

@@ -1,6 +1,7 @@
 import { convertResponsesStreamToJson } from "../../transformer/streamToJsonConverter.js";
 import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
 import { createErrorResult } from "../../utils/error.js";
+import { isEmptyCompletionBody, EMPTY_UPSTREAM_MARKER } from "../../utils/streamGate.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { FORMATS } from "../../translator/formats.js";
 import { PROVIDERS } from "../../config/providers.js";
@@ -226,6 +227,12 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
       // Client is Responses API → return as-is
       if (sourceFormat === FORMATS.OPENAI_RESPONSES) {
+        if (isEmptyCompletionBody(jsonResponse)) {
+          return createErrorResult(
+            HTTP_STATUS.BAD_GATEWAY,
+            `[${EMPTY_UPSTREAM_MARKER}] ${provider}/${model} streamed 200 with an empty completion (no content, reasoning or tool calls)`
+          );
+        }
         return { success: true, response: new Response(JSON.stringify(restoreToolNames(jsonResponse, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
       }
 
@@ -257,6 +264,13 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         }
       }));
       const hasToolCalls = toolCalls.length > 0;
+
+      if (!textContent && !hasToolCalls && isEmptyCompletionBody(jsonResponse)) {
+        return createErrorResult(
+          HTTP_STATUS.BAD_GATEWAY,
+          `[${EMPTY_UPSTREAM_MARKER}] ${provider}/${model} streamed 200 with an empty completion (no content, reasoning or tool calls)`
+        );
+      }
 
       if (sourceFormat === FORMATS.ANTIGRAVITY || sourceFormat === FORMATS.GEMINI || sourceFormat === FORMATS.GEMINI_CLI) {
         finalResp = {
@@ -310,6 +324,15 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
     }
 
     if (onRequestSuccess) await onRequestSuccess();
+
+    // Empty-upstream guard: forced-SSE providers can also terminate with zero
+    // content — fall back instead of delivering a null body to the client.
+    if (isEmptyCompletionBody(parsed)) {
+      return createErrorResult(
+        HTTP_STATUS.BAD_GATEWAY,
+        `[${EMPTY_UPSTREAM_MARKER}] ${provider}/${model} streamed 200 with an empty completion (no content, reasoning or tool calls)`
+      );
+    }
 
     const usage = parsed.usage || {};
     appendLog({ tokens: usage, status: "200 OK" });
