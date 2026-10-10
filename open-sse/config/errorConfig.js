@@ -168,6 +168,7 @@ export const ERROR_RULES = [
   { text: "remedy_hint",              backoff: true },
   { text: "invalid or disabled api key", cooldownMs: ACCOUNT_INVALID_COOLDOWN_MS },
   { text: "invalid api key",          cooldownMs: ACCOUNT_INVALID_COOLDOWN_MS },
+  { text: "insufficient credit",      backoff: true },
   { text: "capacity",                 backoff: true },
   { text: "overloaded",               backoff: true },
 
