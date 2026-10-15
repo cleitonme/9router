@@ -820,6 +820,9 @@
     },
     "forceStream": true,
     "noAuth": true,
+    "reasoningInject": {
+      "scope": "all"
+    },
     "quirks": {
       "forceAutoToolChoiceModels": [
         "muse-spark-1.3-contributor-free"
@@ -1172,5 +1175,16 @@
     "baseUrl": "https://seekai.cc/v1/chat/completions",
     "validateUrl": "https://seekai.cc/v1/models",
     "format": "openai"
+  },
+  "nous": {
+    "baseUrl": "https://inference-api.nousresearch.com/v1/chat/completions",
+    "format": "openai",
+    "auth": {
+      "combined": true,
+      "header": "Authorization",
+      "scheme": "bearer"
+    },
+    "clientId": "hermes-cli",
+    "tokenUrl": "https://portal.nousresearch.com/api/oauth/token"
   }
 }

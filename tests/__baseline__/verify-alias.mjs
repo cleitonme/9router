@@ -25,6 +25,7 @@ const ALIAS_TOKENS = [
   "dv","devin","devin-cli","morph","morphllm",
   "muse","muse-ai","meta-model-api",
   "muse-code","muse-subscription",
+  "nous","nous-portal","nous-research","ns",
 ];
 
 // Sort idToAlias by key — runtime accesses by key, order is irrelevant (content-based)

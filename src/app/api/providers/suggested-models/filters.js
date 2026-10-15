@@ -1,3 +1,5 @@
+import { normalizeNousFreeModels } from "open-sse/services/nous.js";
+
 // Free OpenCode models that don't use the "-free" id suffix
 const KNOWN_FREE_OPENCODE_MODELS = ["big-pickle"];
 
@@ -50,6 +52,8 @@ export const FILTERS = {
       .filter((m) => typeof m?.id === "string" && isRequestyFree(m.pricing))
       .map((m) => ({ id: m.id, name: m.id, contextLength: m.context_window }))
       .sort((a, b) => String(a.id).localeCompare(String(b.id))),
+
+  "nous-free": normalizeNousFreeModels,
 };
 
 // Requesty pricing tier: all price fields must be zero (or absent) for the

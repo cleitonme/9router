@@ -293,6 +293,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
         "grok-cli",
         "muse",
         "glm",
+        "nous",
       ];
       if (deviceCodeProviders.includes(provider)) {
         setIsDeviceCode(true);
