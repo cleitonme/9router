@@ -17,6 +17,24 @@ import { sanitizeSystemoneUpstreamBody } from "../services/systemoneRouting.js";
  *
  * @returns {Promise<{ success: boolean, response: Response, data?: object, usage?: object, status?: number, error?: string }>}
  */
+/**
+ * Normalize the upstream `usage` object into the gateway token shape.
+ * Cloudflare Workers AI (`/ai/run/{model}`) reports
+ * `{ prompt_tokens, completion_tokens }`, while other SystemOne lanes report
+ * OpenAI-style `{ input_tokens, output_tokens }`. Returns null when the
+ * upstream returned no usage at all.
+ *
+ * @param {object|undefined} rawUsage
+ * @returns {{ prompt_tokens: number, completion_tokens: number }|null}
+ */
+export function normalizeSystemoneUsage(rawUsage) {
+  if (!rawUsage || typeof rawUsage !== "object") return null;
+  return {
+    prompt_tokens: rawUsage.prompt_tokens ?? rawUsage.input_tokens ?? 0,
+    completion_tokens: rawUsage.completion_tokens ?? rawUsage.output_tokens ?? 0,
+  };
+}
+
 export async function handleSystemoneCore({
   body,
   modelInfo,
@@ -128,13 +146,11 @@ export async function handleSystemoneCore({
 
   if (onRequestSuccess) await onRequestSuccess();
 
-  const usage = responseBody?.usage;
+  const usage = normalizeSystemoneUsage(responseBody?.usage);
   return {
     success: true,
     data: responseBody,
-    usage: usage
-      ? { prompt_tokens: usage.input_tokens || 0, completion_tokens: usage.output_tokens || 0 }
-      : null,
+    usage,
     response: new Response(JSON.stringify(responseBody), {
       headers: {
         "Content-Type": "application/json",
