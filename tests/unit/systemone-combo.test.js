@@ -24,8 +24,27 @@ import {
 } from "open-sse/config/jev.js";
 import { handleSystemoneCore } from "open-sse/handlers/systemoneCore.js";
 
+// systemoneCore no longer calls the patched global fetch directly — it calls
+// proxyAwareFetch, which captured the real fetch at module load and would
+// bypass vi.stubGlobal("fetch", ...). Mock it as a passthrough that records
+// the proxyOptions argument and delegates to whatever fetch is currently
+// stubbed on the global object.
+const { proxyFetchSpy } = vi.hoisted(() => ({
+  proxyFetchSpy: vi.fn(async (url, options, proxyOptions) => {
+    proxyFetchSpy.lastProxyOptions = proxyOptions;
+    return globalThis.fetch(url, options);
+  }),
+}));
+
+vi.mock("open-sse/utils/proxyFetch.js", () => ({
+  proxyAwareFetch: proxyFetchSpy,
+  default: proxyFetchSpy,
+}));
+
 afterEach(() => {
   vi.unstubAllGlobals();
+  proxyFetchSpy.mockClear();
+  proxyFetchSpy.lastProxyOptions = null;
 });
 
 describe("systemone routing targets", () => {
@@ -425,5 +444,89 @@ describe("systemoneCore upstream sanitization", () => {
     });
     expect(result.success).toBe(false);
     expect(result.status).toBe(400);
+  });
+});
+
+describe("systemoneCore connection proxy", () => {
+  function stubOkFetch() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ ok: true, usage: { input_tokens: 1, output_tokens: 2 } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      )
+    );
+  }
+
+  const logStub = { debug: () => {}, info: () => {}, warn: () => {} };
+
+  it("forwards connection proxy fields from providerSpecificData to proxyAwareFetch", async () => {
+    stubOkFetch();
+    const result = await handleSystemoneCore({
+      body: { state: "s", questions: {} },
+      modelInfo: { provider: "openrouter", model: "typesafe/jev-1.13" },
+      credentials: {
+        apiKey: "test-key",
+        connectionName: "conn-1",
+        providerSpecificData: {
+          connectionProxyEnabled: true,
+          connectionProxyUrl: "http://user:pass@1.2.3.4:8080",
+          connectionNoProxy: "localhost",
+          connectionProxyPoolId: "pool-abc",
+        },
+      },
+      log: logStub,
+    });
+
+    expect(result.success).toBe(true);
+    expect(proxyFetchSpy).toHaveBeenCalledOnce();
+    expect(proxyFetchSpy.lastProxyOptions).toEqual({
+      connectionProxyEnabled: true,
+      connectionProxyUrl: "http://user:pass@1.2.3.4:8080",
+      connectionNoProxy: "localhost",
+      connectionProxyPoolId: "pool-abc",
+      vercelRelayUrl: "",
+    });
+  });
+
+  it("forwards vercelRelayUrl when set", async () => {
+    stubOkFetch();
+    const result = await handleSystemoneCore({
+      body: { state: "s", questions: {} },
+      modelInfo: { provider: "cloudflare-ai", model: "@cf/cloudflare/clef-flash" },
+      credentials: {
+        apiKey: "cf-key",
+        providerSpecificData: {
+          accountId: "acc-123",
+          vercelRelayUrl: "https://relay.example.com/api",
+        },
+      },
+      log: logStub,
+    });
+
+    expect(result.success).toBe(true);
+    expect(proxyFetchSpy.lastProxyOptions?.vercelRelayUrl).toBe("https://relay.example.com/api");
+    expect(proxyFetchSpy.lastProxyOptions?.connectionProxyEnabled).toBe(false);
+  });
+
+  it("passes empty proxy options when credentials have no proxy config", async () => {
+    stubOkFetch();
+    const result = await handleSystemoneCore({
+      body: { state: "s", questions: {} },
+      modelInfo: { provider: "openrouter", model: "typesafe/jev-1.13" },
+      credentials: { apiKey: "test-key" },
+      log: logStub,
+    });
+
+    expect(result.success).toBe(true);
+    expect(proxyFetchSpy.lastProxyOptions).toEqual({
+      connectionProxyEnabled: false,
+      connectionProxyUrl: "",
+      connectionNoProxy: "",
+      connectionProxyPoolId: null,
+      vercelRelayUrl: "",
+    });
   });
 });

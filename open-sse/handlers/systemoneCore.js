@@ -1,5 +1,6 @@
 import { createErrorResult, parseUpstreamError, formatProviderError } from "../utils/error.js";
 import { HTTP_STATUS, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
+import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { PROVIDER_MEDIA } from "../providers/index.js";
 import { getModelUpstreamId } from "../config/providerModels.js";
 import { generateSessionId } from "../executors/opencode-zen.js";
@@ -72,16 +73,39 @@ export async function handleSystemoneCore({
 
   log?.debug?.("SYSTEMONE", `${provider.toUpperCase()} | ${model}`);
 
+  // Connection-level proxy (Estratégia de Rotação / proxy pool) — same mapping
+  // as chatCore, so per-connection and per-provider-strategy proxies apply here too.
+  const proxyOptions = {
+    connectionProxyEnabled: credentials?.providerSpecificData?.connectionProxyEnabled === true,
+    connectionProxyUrl: credentials?.providerSpecificData?.connectionProxyUrl || "",
+    connectionNoProxy: credentials?.providerSpecificData?.connectionNoProxy || "",
+    connectionProxyPoolId: credentials?.providerSpecificData?.connectionProxyPoolId || null,
+    vercelRelayUrl: credentials?.providerSpecificData?.vercelRelayUrl || "",
+  };
+
+  if (proxyOptions.vercelRelayUrl) {
+    log?.info?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${credentials?.connectionName || "unknown"} | pool=${proxyOptions.connectionProxyPoolId || "none"} | vercel-relay=${proxyOptions.vercelRelayUrl}`);
+  } else if (proxyOptions.connectionProxyEnabled && proxyOptions.connectionProxyUrl) {
+    let maskedProxyUrl = proxyOptions.connectionProxyUrl;
+    try {
+      const parsed = new URL(proxyOptions.connectionProxyUrl);
+      maskedProxyUrl = `${parsed.protocol || "http:"}//${parsed.hostname || ""}${parsed.port ? `:${parsed.port}` : ""}`;
+    } catch {
+      // Keep raw if URL parsing fails
+    }
+    log?.info?.("PROXY", `${provider.toUpperCase()} | ${model} | conn=${credentials?.connectionName || "unknown"} | pool=${proxyOptions.connectionProxyPoolId || "none"} | url=${maskedProxyUrl}`);
+  }
+
   let providerResponse;
   try {
-    providerResponse = await fetch(targetUrl, {
+    providerResponse = await proxyAwareFetch(targetUrl, {
       method: "POST",
       headers,
       body: JSON.stringify(requestBody),
       ...(typeof AbortSignal?.timeout === "function"
         ? { signal: AbortSignal.timeout(FETCH_CONNECT_TIMEOUT_MS) }
         : {}),
-    });
+    }, proxyOptions);
   } catch (error) {
     const errMsg = formatProviderError(error, provider, model, HTTP_STATUS.BAD_GATEWAY);
     log?.debug?.("SYSTEMONE", `Fetch error: ${errMsg}`);
