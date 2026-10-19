@@ -98,6 +98,48 @@ describe("systemone routing targets", () => {
     expect(t.models).toEqual(["oc/jev-1.13-free", "openrouter/typesafe/jev-1.13"]);
   });
 
+  it("expands a registered combo name without an explicit mode", async () => {
+    const t = await resolveSystemoneTargets(
+      { model: "my-combo", state: "s", questions: {} },
+      async (name) => (name === "my-combo" ? ["oc/jev-1.13-free", "openrouter/typesafe/jev-1.13"] : null)
+    );
+    expect(t).toEqual({
+      mode: "combo",
+      models: ["oc/jev-1.13-free", "openrouter/typesafe/jev-1.13"],
+    });
+  });
+
+  it("keeps single mode when the name is not a registered combo", async () => {
+    const t = await resolveSystemoneTargets(
+      { model: "unknown-name", state: "s", questions: {} },
+      async () => null
+    );
+    expect(t).toEqual({ mode: "single", models: ["unknown-name"] });
+  });
+
+  it("never treats provider/model ids or auto as combo names", async () => {
+    const lookup = vi.fn(async () => ["oc/jev-1.13-free"]);
+    const a = await resolveSystemoneTargets(
+      { model: "oc/jev-1.13-free", state: "s", questions: {} },
+      lookup
+    );
+    expect(a).toEqual({ mode: "single", models: ["oc/jev-1.13-free"] });
+    const b = await resolveSystemoneTargets(
+      { model: "auto", models: ["oc/jev-1.13-free"], state: "s", questions: {} },
+      lookup
+    );
+    expect(b.mode).toBe("auto");
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it("expands a combo whose models are non-strings only when members remain", async () => {
+    const t = await resolveSystemoneTargets(
+      { model: "weird-combo", state: "s", questions: {} },
+      async () => ["oc/jev-1.13-free", 42, ""]
+    );
+    expect(t).toEqual({ mode: "combo", models: ["oc/jev-1.13-free"] });
+  });
+
   it("throws MISSING_MODELS when combo/auto has no list", async () => {
     await expect(
       resolveSystemoneTargets({ mode: "combo", state: "s", questions: {} })

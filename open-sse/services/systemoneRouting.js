@@ -104,6 +104,8 @@ export function sanitizeSystemoneUpstreamBody(body, model) {
  * @param {function(string): (string[]|null|Promise<string[]|null>)} [comboLookup]
  *   sync or async lookup of a registered combo name -> models[].
  * @returns {Promise<{ mode: "single"|"combo"|"auto", models: string[] }>}
+ *   A plain `model` matching a registered combo name (via comboLookup)
+ *   resolves as mode "combo" — no explicit `mode:"combo"` needed.
  * @throws {Error} with `code === "MISSING_MODELS"` when combo/auto has no list.
  */
 export async function resolveSystemoneTargets(body, comboLookup = null) {
@@ -112,6 +114,16 @@ export async function resolveSystemoneTargets(body, comboLookup = null) {
   const isCombo = modeRaw === "combo";
 
   if (!isAuto && !isCombo) {
+    // A plain `model` holding a registered combo name (no explicit mode)
+    // expands straight to a combo. Combo names are validated without "/"
+    // so they can never collide with real "provider/model" ids — those
+    // (and the "auto" sentinel) always stay single/auto.
+    if (comboLookup && typeof body?.model === "string" && body.model.includes("/") === false) {
+      const expanded = await comboLookup(body.model);
+      if (Array.isArray(expanded) && expanded.length > 0) {
+        return { mode: "combo", models: expanded.filter((m) => typeof m === "string" && m.length > 0) };
+      }
+    }
     return { mode: "single", models: body?.model ? [body.model] : [] };
   }
 

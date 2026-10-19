@@ -22,6 +22,7 @@ const KIND_LABELS = {
   webFetch: "Web Fetch",
   image: "Text to Image",
   tts: "Text To Speech",
+  systemone: "System One",
 };
 
 const EXAMPLE_PATHS = {
@@ -29,6 +30,17 @@ const EXAMPLE_PATHS = {
   webFetch: "/v1/web/fetch",
   image: "/v1/images/generations",
   tts: "/v1/audio/speech",
+  systemone: "/v1/systemone",
+};
+
+// System One decision payload (state + questions are required fields).
+const SYSTEMONE_STATE = {
+  input: "Should I retry the failed job?",
+  history: [],
+};
+const SYSTEMONE_QUESTIONS = {
+  "task": "route_decision",
+  "metrics": { complexity: 0.5 },
 };
 
 const EXAMPLE_BODIES = {
@@ -36,6 +48,7 @@ const EXAMPLE_BODIES = {
   webFetch: (n) => ({ model: n, url: "https://example.com", format: "markdown" }),
   image: (n) => ({ model: n, prompt: "A cute cat playing piano", n: 1, size: "1024x1024" }),
   tts: (n) => ({ model: n, input: "Hello, this is a test.", voice: "alloy" }),
+  systemone: (n) => ({ model: n, state: SYSTEMONE_STATE, questions: SYSTEMONE_QUESTIONS }),
 };
 
 // Map combo.kind → listing route to go back to
@@ -273,7 +286,11 @@ export default function ComboDetailPage() {
               <p className="text-sm font-medium">Round Robin</p>
               <p className="text-xs text-text-muted">Rotate providers across requests instead of strict fallback order.</p>
             </div>
-            <Toggle checked={roundRobin} onChange={handleToggleRoundRobin} />
+            {combo.kind === "systemone" ? (
+              <span className="text-xs text-text-muted italic">Sequential fallback only</span>
+            ) : (
+              <Toggle checked={roundRobin} onChange={handleToggleRoundRobin} />
+            )}
           </div>
         </div>
       </Card>
