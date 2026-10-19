@@ -5,6 +5,7 @@ import {
   MODEL_NOT_FOUND_PATTERNS,
   ACCOUNT_ACCESS_PATTERNS,
   ROUTE_INCOMPATIBLE_PATTERNS,
+  IP_ABUSIVE_PATTERNS,
 } from "../config/errorConfig.js";
 
 // Canonical error types for fallback decisions.
@@ -15,6 +16,7 @@ export const CLASSIFIED_TYPES = {
   MODEL_RETIRED: "model_retired",
   MODEL_NOT_FOUND: "model_not_found",
   ROUTE_INCOMPATIBLE: "route_incompatible",
+  IP_ABUSIVE: "ip_abusive",
   UPSTREAM_OVERLOAD: "upstream_overload",
   UPSTREAM_RATE_LIMIT: "upstream_rate_limit",
   CONCURRENCY_LIMIT: "concurrency_limit",
@@ -192,7 +194,20 @@ export function classifyError({ status, bodyText = "", bodyJson = null, headers 
     }
   }
 
-  // 2) Permanent model retirement: 410 Gone or explicit EOL wording.
+  // 2) Upstream blocked the client IP (403 "abusive traffic from this IP"):
+  // the account and key are fine — the egress IP is. Very specific wording
+  // checked early so a bare 403 never lands on invalid_credentials.
+  const ipAbusiveHit = IP_ABUSIVE_PATTERNS.some((p) => lower.includes(p));
+  if (ipAbusiveHit) {
+    return {
+      type: CLASSIFIED_TYPES.IP_ABUSIVE, scope: CLASSIFIED_SCOPES.ACCOUNT,
+      retryable: false, maxRetries: 0, retryAfterMs: null,
+      upstreamProvider: env.providerName || null, limitSource: env.limitSource,
+      remedyHint: env.remedyHint, isByok: env.isByok, current: env.current, limit: env.limit,
+    };
+  }
+
+  // 3) Permanent model retirement: 410 Gone or explicit EOL wording.
   // Never confuse with a dead account — scope is model@provider, and the
   // caller must skip the candidate instead of burning every account.
   const retiredHit = MODEL_RETIRED_PATTERNS.some((p) => lower.includes(p));

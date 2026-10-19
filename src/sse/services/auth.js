@@ -1,7 +1,8 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
+import { getQuarantinedPoolIds, isPoolQuarantined } from "@/lib/network/poolQuarantine";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
-import { MAX_RATE_LIMIT_COOLDOWN_MS, ACCOUNT_INVALID_COOLDOWN_MS, QUOTA_EXHAUSTED_DEFAULT_MS, PAYMENT_REQUIRED_COOLDOWN_MS, MODEL_SKIP_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
+import { MAX_RATE_LIMIT_COOLDOWN_MS, ACCOUNT_INVALID_COOLDOWN_MS, QUOTA_EXHAUSTED_DEFAULT_MS, PAYMENT_REQUIRED_COOLDOWN_MS, MODEL_SKIP_COOLDOWN_MS, IP_ABUSIVE_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { classifyError } from "open-sse/utils/classifyError.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { getAntigravityQuotaCache } from "./antigravityQuota.js";
@@ -52,7 +53,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       let pickedId = override.proxyPoolId || null;
       if (strategy !== "none") {
         const allPools = await getProxyPools({ isActive: true });
-        const poolIds = allPools.filter(p => p.proxyUrl).map(p => p.id);
+        const quarantined = await getQuarantinedPoolIds();
+        // IP-banned pools (e.g. upstream 403 "abusive traffic") never rotate.
+        // If every pool is parked, rotation collapses to none → direct route.
+        const poolIds = allPools.filter(p => p.proxyUrl && !quarantined.has(p.id)).map(p => p.id);
         pickedId = pickProxyPoolId(poolIds, strategy, providerId);
       }
       const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });
@@ -83,10 +87,25 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const isAntigravity = providerId === "antigravity";
     const antigravityQuotaCache = isAntigravity && model ? getAntigravityQuotaCache() : null;
 
-    // Filter out model-locked, excluded, and Antigravity quota-exhausted connections.
+    // Settings fetched before the filter so the pool-quarantine check can
+    // resolve the default pool (connections without an explicit pool inherit
+    // settings.defaultProxyPoolId at resolve time — see resolveConnectionProxyConfig).
+    const settings = await getSettings();
+    const globalDefaultPoolId = settings.defaultProxyPoolId || null;
+
+    // Filter out model-locked, excluded, pool-quarantined and Antigravity
+    // quota-exhausted connections.
+    const quarantinedPoolIds = await getQuarantinedPoolIds();
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
       if (isModelLockActive(c, model)) return false;
+      // Skip connections whose effective egress pool is IP-banned.
+      const explicitPoolId = c.providerSpecificData?.proxyPoolId;
+      const effectivePoolId = explicitPoolId && explicitPoolId !== "__none__" ? explicitPoolId : globalDefaultPoolId;
+      if (effectivePoolId && quarantinedPoolIds.has(effectivePoolId)) {
+        log.debug("AUTH", `  → ${c.id?.slice(0, 8)} | pool=${effectivePoolId} quarantined — skip`);
+        return false;
+      }
       const enabled = c.providerSpecificData?.enabledModels;
       if (providerId === "codex" && Array.isArray(enabled) && enabled.length && requestedModel && !enabled.includes(requestedModel)) return false;
       // Antigravity: skip if live quota exhausted for this model
@@ -115,6 +134,17 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       // Find earliest persistent lock or lazy Antigravity quota-cache reset for retry timing.
       const lockedConns = connections.filter(c => isModelLockActive(c, model));
       const expiries = lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean);
+      // Pool quarantines also gate availability: report the earliest lift.
+      if (quarantinedPoolIds.size > 0) {
+        try {
+          const allPools = await getProxyPools();
+          for (const pool of allPools) {
+            if (quarantinedPoolIds.has(pool.id) && isPoolQuarantined(pool)) {
+              expiries.push(new Date(pool.quarantineUntil).toISOString());
+            }
+          }
+        } catch { /* fail-open on the expiry hint */ }
+      }
       if (isAntigravity && model && antigravityQuotaCache) {
         connections.forEach((c) => {
           const resetAt = antigravityQuotaCache.get(c.id)?.[model]?.resetAt;
@@ -137,7 +167,6 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       return null;
     }
 
-    const settings = await getSettings();
     // Per-provider strategy overrides global setting
     const providerOverride = (settings.providerStrategies || {})[providerId] || {};
     const strategy = providerOverride.fallbackStrategy || settings.fallbackStrategy || "fill-first";
@@ -269,6 +298,15 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   if (githubResetAtMs) {
     shouldFallback = true;
     cooldownMs = githubResetAtMs - Date.now();
+    newBackoffLevel = 0;
+    lockModel = null;
+  } else if (classification?.type === "ip_abusive") {
+    // Upstream blocked the egress IP ("abusive traffic"): when no proxy pool
+    // carries this account, the account rides the bad IP directly — park it
+    // a full day at account level. With a pool, the caller quarantines the
+    // pool + excludes this account for the request.
+    shouldFallback = true;
+    cooldownMs = IP_ABUSIVE_COOLDOWN_MS;
     newBackoffLevel = 0;
     lockModel = null;
   } else if (classification?.type === "invalid_credentials") {

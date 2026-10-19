@@ -17,6 +17,7 @@ import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
 import { errorResponse, unavailableResponse, parseResetsAtMsFromHeaders } from "open-sse/utils/error.js";
 import { upstreamResponseHeaders } from "open-sse/utils/upstreamHeaders.js";
 import { classifyError, upstreamBackoffMs } from "open-sse/utils/classifyError.js";
+import { quarantineProxyPool } from "@/lib/network/poolQuarantine";
 import { blockUpstream, isUpstreamBlocked, blockLogicalProvider, isLogicalProviderBlocked, isGatewayBlocked } from "open-sse/services/providerLock.js";
 import { handleComboChat, handleFusionChat, detectRequiredCapabilities, reorderModelsForTier } from "open-sse/services/combo.js";
 import { classifyTier } from "open-sse/services/jevClassifier.js";
@@ -510,6 +511,28 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         void noByok;
       }
     } catch { /* fail-open */ }
+
+    // Upstream blocked the egress IP (403 "abusive traffic from this IP"):
+    // account and key are fine — the proxy pool IP is banned. Park the pool
+    // for 24h and move on to the next account/route right away.
+    if (ctype === "ip_abusive") {
+      const abusivePoolId = refreshedCredentials?.providerSpecificData?.connectionProxyPoolId || null;
+      if (abusivePoolId) {
+        await quarantineProxyPool(abusivePoolId, "upstream_ip_abuse", result.error);
+        log.warn("PROXY", `${provider} pool=${abusivePoolId} reason=ip_abusive status=${result.status} action=pool_quarantine_24h action=next_account request_id=${reqId}`);
+      } else {
+        // No pool behind this attempt → the account itself rides the bad IP.
+        const r = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, null, { bodyJson: result.bodyJson, headers: result.response?.headers });
+        void r;
+        log.warn("AUTH", `${provider} account=${account} reason=ip_abusive status=${result.status} action=lock_account_24h action=next_account request_id=${reqId}`);
+      }
+      excludeConnectionIds.add(credentials.connectionId);
+      lastError = result.error;
+      lastStatus = result.status;
+      lastHeaders = upstreamResponseHeaders(result.response?.headers);
+      retryCount += 1;
+      continue;
+    }
 
     // 401 invalid/disabled key: lock ONLY this account 30min, next account now.
     if (ctype === "invalid_credentials") {

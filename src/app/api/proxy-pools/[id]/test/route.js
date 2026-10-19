@@ -54,6 +54,11 @@ export async function POST(request, { params }) {
       lastError: result.ok ? null : (result.error || `Proxy test failed with status ${result.status}`),
       isActive: result.ok,
     });
+    // A passing test revives the pool early (manual lift of the 24h IP ban);
+    // a failing test must NOT silently clear an existing quarantine.
+    if (result.ok) {
+      await updateProxyPool(id, { quarantineUntil: null, quarantineReason: null, quarantineStartedAt: null });
+    }
 
     return NextResponse.json({
       ok: result.ok,

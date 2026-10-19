@@ -1,4 +1,5 @@
 import { getProxyPoolById } from "@/models";
+import { isPoolQuarantined } from "@/lib/network/poolQuarantine";
 
 // Safely normalize any value into a trimmed string.
 function normalizeString(value) {
@@ -97,7 +98,8 @@ export async function resolveConnectionProxyConfig(
       const isValidPool =
         proxyPool &&
         proxyPool.isActive === true &&
-        proxyUrl;
+        proxyUrl &&
+        !isPoolQuarantined(proxyPool);
 
       poolStrictProxy = proxyPool?.strictProxy === true;
 
@@ -155,7 +157,7 @@ export async function resolveConnectionProxyConfig(
       const defaultProxyUrl = normalizeString(defaultPool?.proxyUrl);
       const defaultNoProxy = normalizeString(defaultPool?.noProxy);
 
-      if (defaultPool && defaultPool.isActive === true && defaultProxyUrl) {
+      if (defaultPool && defaultPool.isActive === true && defaultProxyUrl && !isPoolQuarantined(defaultPool)) {
         if (defaultPool.type === "vercel" || defaultPool.type === "cloudflare" || defaultPool.type === "deno" || defaultPool.type === "netlify") {
           return {
             source: defaultPool.type,

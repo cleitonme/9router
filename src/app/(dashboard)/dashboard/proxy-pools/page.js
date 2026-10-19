@@ -93,7 +93,14 @@ export default function ProxyPoolsPage() {
       ]);
       const data = await resPools.json();
       if (resPools.ok) {
-        setProxyPools(data.proxyPools || []);
+        // Quarantine display data is derived at fetch time (in a callback);
+        // Date.now() must not run during render (react-hooks/purity).
+        const nowMs = Date.now();
+        setProxyPools((data.proxyPools || []).map((pool) => {
+          const qUntil = pool.quarantineUntil ? new Date(pool.quarantineUntil).getTime() : 0;
+          if (!qUntil || qUntil <= nowMs) return { ...pool, quarantined: false, quarantineHoursLeft: 0 };
+          return { ...pool, quarantined: true, quarantineHoursLeft: Math.max(1, Math.ceil((qUntil - nowMs) / 3600000)) };
+        }));
       }
       if (resSettings.ok) {
         const sData = await resSettings.json();
@@ -1007,6 +1014,11 @@ export default function ProxyPoolsPage() {
                     <Badge variant={getStatusVariant(pool.testStatus)} size="sm" dot>
                       {pool.testStatus || "unknown"}
                     </Badge>
+                    {pool.quarantined && (
+                      <Badge variant="error" size="sm">
+                        🧊 IP bloqueado ({pool.quarantineHoursLeft}h)
+                      </Badge>
+                    )}
                     <Badge variant={pool.isActive ? "success" : "default"} size="sm">
                       {pool.isActive ? "active" : "inactive"}
                     </Badge>
@@ -1033,6 +1045,9 @@ export default function ProxyPoolsPage() {
                   <p className="text-[11px] text-text-muted mt-1">
                     Last tested: {formatDateTime(pool.lastTestedAt)}
                     {pool.lastError ? ` · ${pool.lastError}` : ""}
+                    {pool.quarantined
+                      ? ` · Quarentena até ${formatDateTime(pool.quarantineUntil)} (${pool.quarantineReason || "upstream_ip_abuse"})`
+                      : ""}
                   </p>
                   </div>
                 </div>

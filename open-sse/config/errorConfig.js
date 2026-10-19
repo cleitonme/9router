@@ -59,6 +59,19 @@ export const MODEL_RETIRED_RECHECK_MS = 7 * 24 * 60 * 60 * 1000;
 // Model-not-found / route-incompatible: skip the candidate without parking
 // healthy accounts behind a long lock.
 export const MODEL_SKIP_COOLDOWN_MS = 60 * 1000;
+// Upstream blocked the client IP (403 "abusive traffic from this IP"): the
+// proxy pool owning that IP is parked for a full day. Fixed duration by
+// design — never extended on repeated hits (upstream text is advisory only).
+export const IP_ABUSIVE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+// Substring signals (lowercased before match) for an IP-level upstream block.
+// Kept here — never hardcoded in classifyError.js (config-driven convention).
+export const IP_ABUSIVE_PATTERNS = [
+  "abusive traffic",
+  "detected abusive traffic from",
+  "abusive traffic from this ip",
+  "aren't available from your current network",
+  "are not available from your current network",
+];
 
 // Substring signals (lowercased before match). Kept here — never hardcoded
 // in classifyError.js / accountFallback.js (config-driven convention).
