@@ -10,7 +10,7 @@ export default {
     textIcon: "FA",
     website: "https://free.ai.id",
     notice: {
-      text: "Free OpenAI-compatible relay pooling several public tiers (OpenCode, Kilo, OVHcloud, Notrack, ...). Bearer API key from the site dashboard; 30 req/min + 2 concurrent per IP; thinking via reasoning_effort or model(level) suffix.",
+      text: "Free OpenAI-compatible relay pooling several public tiers (OpenCode, Kilo, OVHcloud, Notrack, ...). Bearer API key from the site dashboard; 30 req/min + 2 concurrent per IP; thinking via reasoning_effort or model(level) suffix. SystemOne lane (/v1/systemone, jev-1.13-free) is premium-key only — key pública da doc retorna 402/401; doa em /premium.",
       apiKeyUrl: "https://free.ai.id/dashboard",
     },
   },
@@ -26,6 +26,7 @@ export default {
     validateUrl: "https://free.ai.id/v1/models",
   },
   models: [
+    { id: "jev-1.13-free", name: "Jev 1.13 Free (SystemOne, premium)", kind: "systemone" },
     { id: "glm-5.3-flash-free", name: "GLM 5.3 Flash (Free)", contextLength: 200000 },
     { id: "mimo-v2.6-flash-free", name: "MiMo 2.6 Flash (Free)", contextLength: 1048576 },
     { id: "deepseek-v4.1-flash-free", name: "DeepSeek V4.1 Flash (Free)", contextLength: 200000 },
@@ -66,4 +67,10 @@ export default {
     { id: "ovh-free/Meta-Llama-3_3-70B-Instruct", name: "Llama 3.3 70B Instruct (OVH, Free)", contextLength: 131072 },
   ],
   passthroughModels: true,
+  serviceKinds: ["llm", "systemone"],
+  systemoneConfig: {
+    baseUrl: "https://free.ai.id/v1/systemone",
+    authType: "apikey",
+    authHeader: "bearer",
+  },
 };
