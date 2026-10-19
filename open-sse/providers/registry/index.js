@@ -137,6 +137,7 @@ import p134 from "./typesafe.js";
 import p135 from "./requesty.js";
 import p136 from "./seekai.js";
 import p137 from "./nous.js";
+import p138 from "./freeaiid.js";
 export default [
   p0,
   p1,
@@ -274,4 +275,5 @@ export default [
   p135,
   p136,
   p137,
+  p138,
 ];
