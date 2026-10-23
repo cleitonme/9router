@@ -6,6 +6,11 @@ const ICON_ALIASES = {
   "gitlab-duo": "gitlab",
   "vercel-ai-gateway": "vercel",
   "ollama-search": "ollama",
+  // Web-cookie variants ride their brand's existing mark
+  "deepseek-web": "deepseek",
+  "muse-web": "muse",
+  "gemini-web": "gemini",
+  "chatgpt-web": "openai",
 };
 
 // Runtime only — first 404 remembers id for the whole session

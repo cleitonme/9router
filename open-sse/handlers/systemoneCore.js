@@ -6,6 +6,25 @@ import { getModelUpstreamId } from "../config/providerModels.js";
 import { generateSessionId } from "../executors/opencode-zen.js";
 import { sanitizeSystemoneUpstreamBody } from "../services/systemoneRouting.js";
 
+const OPENCODE_PROVIDERS = new Set(["opencode", "opencode-zen"]);
+
+/**
+ * Resolve the System One URL. A saved host override is joined with the registry
+ * `path` (e.g. "/v1/systemone") without doubling a "/v1" or "/v1/systemone" the
+ * user already included. Without `path`, the override is used as a full URL.
+ */
+export function buildSystemoneUrl(override, cfg) {
+  const base = typeof override === "string" ? override.trim() : "";
+  if (!base) return cfg?.baseUrl;
+  if (!cfg?.path) return base;
+  const host = base.replace(/\/+$/, "");
+  const path = cfg.path.replace(/\/+$/, "");
+  if (host.endsWith(path)) return host;
+  const prefix = path.slice(0, path.lastIndexOf("/"));
+  if (prefix && host.endsWith(prefix)) return host + path.slice(prefix.length);
+  return host + path;
+}
+
 /**
  * Core System One (Jev) handler — native decision payload pass-through.
  * URL/headers come from the registry's systemoneConfig; body and JSON response
@@ -44,7 +63,7 @@ export async function handleSystemoneCore({
 }) {
   const { provider, model } = modelInfo;
   const cfg = PROVIDER_MEDIA[provider]?.systemoneConfig;
-  let targetUrl = credentials?.providerSpecificData?.baseUrl || cfg?.baseUrl;
+  let targetUrl = buildSystemoneUrl(credentials?.providerSpecificData?.baseUrl, cfg);
   if (!targetUrl) {
     return createErrorResult(
       HTTP_STATUS.BAD_REQUEST,
@@ -76,14 +95,13 @@ export async function handleSystemoneCore({
 
   // noAuth free lanes carry accessToken "public" from the credential stub.
   const token = credentials?.apiKey || credentials?.accessToken;
-  // Zen lanes expect the official client session header on every request.
-  const session = generateSessionId();
+  // Zen lanes expect the official client session header; other providers don't need it.
+  const session = OPENCODE_PROVIDERS.has(provider) ? generateSessionId() : null;
   const headers = {
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(cfg.headers || {}),
-    "x-opencode-session": session,
-    "x-opencode-session-id": session,
+    ...(session ? { "x-opencode-session": session, "x-opencode-session-id": session } : {}),
   };
   // Cloudflare validates the body model as a short selector (e.g. "clef-flash"), not the full id.
   const upstreamModel = getModelUpstreamId(provider, model) || model;

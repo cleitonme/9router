@@ -21,7 +21,9 @@ const nextConfig = {
   // letter). That throw happens at module scope, so every consumer of `open` dies on
   // import — including xAI/Grok token refresh, which loads the OAuth service that imports
   // it. Keeping it external preserves the real `import.meta.url` at runtime.
-  serverExternalPackages: ["better-sqlite3", "sql.js", "node:sqlite", "bun:sqlite", "open"],
+  // wreq-js resolves its rust native binding by relative require paths from its own
+  // package dir — bundling breaks those paths ("Failed to load native module").
+  serverExternalPackages: ["better-sqlite3", "sql.js", "node:sqlite", "bun:sqlite", "open", "wreq-js"],
   turbopack: {
     root: tracingRoot
   },

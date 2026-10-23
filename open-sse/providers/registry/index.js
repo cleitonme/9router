@@ -138,6 +138,12 @@ import p135 from "./requesty.js";
 import p136 from "./seekai.js";
 import p137 from "./nous.js";
 import p138 from "./freeaiid.js";
+import p140 from "./deepseek-web.js";
+import p143 from "./gemini-web.js";
+import p144 from "./muse-web.js";
+import p146 from "./chatgpt-web.js";
+import p147 from "./veoaifree-web.js";
+import p151 from "./uc-web.js";
 export default [
   p0,
   p1,
@@ -276,4 +282,10 @@ export default [
   p136,
   p137,
   p138,
+  p140,
+  p143,
+  p144,
+  p146,
+  p147,
+  p151,
 ];
