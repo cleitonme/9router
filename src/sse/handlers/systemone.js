@@ -20,7 +20,10 @@ import {
   clearSystemoneModelCooling,
   isSystemoneModelCooling,
   getSystemoneCooldownRemaining,
+  getSystemoneCooldownInfo,
+  resolveSystemoneCooldownTtlMs,
 } from "open-sse/services/systemoneRouting.js";
+import { formatRetryAfter } from "open-sse/services/accountFallback.js";
 import { isGatewayBlocked, isLogicalProviderBlocked } from "open-sse/services/providerLock.js";
 import REGISTRY from "open-sse/providers/registry/index.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
@@ -148,6 +151,28 @@ export async function handleSystemone(request) {
   return handleMultiSystemone({ body, targets, apiKey, url });
 }
 
+/**
+ * Park a failed candidate in the RAM cooldown map so the next request skips it.
+ * Uses the upstream reset hint when present; otherwise a status-based TTL —
+ * noAuth lanes get a longer fallback because they have no DB modelLock row.
+ * Returns the expiry epoch-ms, or 0 when the failure is not cooldownable.
+ */
+function markSystemoneFailureCooldown(candidateStr, result) {
+  if (!candidateStr || !result || result.ok) return 0;
+  const resetAt = result.retryAfterMs || result.resetsAtMs || null;
+  const ttlMs = resolveSystemoneCooldownTtlMs({
+    status: result.status,
+    retryAfterMs: resetAt,
+    noAuth: result.noAuth === true,
+  });
+  const until = markSystemoneModelCooling(candidateStr, result.status, Date.now(), { ttlMs });
+  if (until > 0) {
+    const ttlSec = Math.round((until - Date.now()) / 1000);
+    log.info("SYSTEMONE", `cooldown: ${candidateStr} for ${ttlSec}s (${result.status})`);
+  }
+  return until;
+}
+
 async function handleSingleSystemone({ body, modelStr, apiKey, url }) {
   const modelInfo = await getModelInfo(modelStr);
   if (!modelInfo.provider) {
@@ -163,9 +188,23 @@ async function handleSingleSystemone({ body, modelStr, apiKey, url }) {
     log.info("ROUTING", `Provider: ${provider}, Model: ${model}`);
   }
 
+  const cooling = getSystemoneCooldownInfo(modelStr);
+  if (cooling) {
+    const retryAfter = new Date(cooling.until).toISOString();
+    const retryAfterHuman = formatRetryAfter(retryAfter);
+    log.warn("SYSTEMONE", `single ${modelStr} cooling, skipping upstream (${retryAfterHuman})`);
+    return unavailableResponse(
+      cooling.status || HTTP_STATUS.RATE_LIMITED,
+      `[${modelStr}] cooling down`,
+      retryAfter,
+      retryAfterHuman
+    );
+  }
+
   const result = await trySingleSystemoneModel({ body, modelStr, provider, model });
 
   if (result.ok) {
+    clearSystemoneModelCooling(modelStr);
     if (result.usage) {
       saveRequestUsage({
         provider,
@@ -183,6 +222,7 @@ async function handleSingleSystemone({ body, modelStr, apiKey, url }) {
     return result.response;
   }
 
+  markSystemoneFailureCooldown(modelStr, result);
   return result.response;
 }
 
@@ -234,20 +274,22 @@ async function handleMultiSystemone({ body, targets, apiKey, url }) {
   // as single-model), so clients that only swap the model keep working.
   const wantEnvelope = shouldUseSystemoneEnvelope(body, url?.searchParams);
 
-  // Auto cooldown: skip candidates that recently failed with 429/5xx so a
-  // saturated lane (e.g. oc/jev-1.13-free 429) doesn't burn an upstream call
-  // on every request. Explicit combo lists are never filtered — only
-  // zero-config auto discovery. Fail-open: all-cooling still tries everything.
-  if (autoDiscovered && candidates.length > 0) {
+  // Per-model cooldown: skip candidates that recently failed with 429/5xx so a
+  // saturated lane (e.g. noAuth oc/jev-1.13-free 429) doesn't burn an upstream
+  // call on every request. Applies to explicit combos and auto discovery alike.
+  // Fail-open: when every candidate is cooling, the full list is still tried.
+  let skippedCooling = 0;
+  if (candidates.length > 0) {
     const cooling = candidates.filter((c) => isSystemoneModelCooling(c));
     if (cooling.length > 0 && cooling.length < candidates.length) {
       for (const s of cooling) {
         const leftSec = Math.ceil(getSystemoneCooldownRemaining(s) / 1000);
-        log.info("SYSTEMONE", `auto cooldown: skipping ${s} (${leftSec}s left)`);
+        log.info("SYSTEMONE", `cooldown: skipping ${s} (${leftSec}s left)`);
       }
       candidates = filterSystemoneCooling(candidates);
+      skippedCooling = cooling.length;
     } else if (cooling.length === candidates.length) {
-      log.info("SYSTEMONE", "auto cooldown: all candidates cooling, trying full list (fail-open)");
+      log.info("SYSTEMONE", "cooldown: all candidates cooling, trying full list (fail-open)");
     }
   }
 
@@ -268,7 +310,10 @@ async function handleMultiSystemone({ body, targets, apiKey, url }) {
     const result = await trySingleSystemoneModel({ body, modelStr: candidateStr, provider, model });
 
     if (result.ok) {
-      if (autoDiscovered) clearSystemoneModelCooling(candidateStr);
+      clearSystemoneModelCooling(candidateStr);
+      // A win after skipping cooling lanes is still a fallback from the
+      // configured primary, so count skipped candidates as fallback too.
+      const fallbackUsed = skippedCooling > 0 || attempted.length > 1;
       if (result.usage) {
         saveRequestUsage({
           provider,
@@ -283,12 +328,12 @@ async function handleMultiSystemone({ body, targets, apiKey, url }) {
           status: "success",
         }).catch(() => {});
       }
-      log.info("SYSTEMONE", `${mode} winner: ${candidateStr} (fallback_used=${i > 0})`);
+      log.info("SYSTEMONE", `${mode} winner: ${candidateStr} (fallback_used=${fallbackUsed})`);
       const routingHeaders = systemoneRoutingHeaders({
         selectedModel: candidateStr,
         provider,
         mode,
-        fallbackUsed: i > 0,
+        fallbackUsed,
         attempted,
       });
       if (wantEnvelope) {
@@ -297,7 +342,7 @@ async function handleMultiSystemone({ body, targets, apiKey, url }) {
           selectedModel: candidateStr,
           provider,
           mode,
-          fallbackUsed: i > 0,
+          fallbackUsed,
           attempted,
           usage: result.usage,
         });
@@ -316,14 +361,8 @@ async function handleMultiSystemone({ body, targets, apiKey, url }) {
     }
 
     // A provider error never aborts the combo — record and try next.
-    // Auto lanes also cool down on 429/5xx so the next request skips them.
-    if (autoDiscovered) {
-      const until = markSystemoneModelCooling(candidateStr, result.status);
-      if (until > 0) {
-        const ttlSec = Math.round((until - Date.now()) / 1000);
-        log.info("SYSTEMONE", `auto cooldown: ${candidateStr} cooling for ${ttlSec}s (${result.status})`);
-      }
-    }
+    // Every mode cools down on 429/5xx so the next request skips the lane.
+    markSystemoneFailureCooldown(candidateStr, result);
     errors.push({ model: candidateStr, status: result.status, message: result.error });
     log.warn("SYSTEMONE", `Model ${candidateStr} failed (${result.status}), trying next`, { error: result.error });
   }
@@ -346,20 +385,26 @@ async function trySingleSystemoneModel({ body, modelStr, provider, model }) {
   const excludeConnectionIds = new Set();
   let lastError = null;
   let lastStatus = null;
+  let lastRetryAfterMs = null;
+  let lastNoAuth = false;
   while (true) {
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    const isNoAuth = credentials?.id === "noauth";
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
+        const retryAfterMs = credentials.retryAfter ? new Date(credentials.retryAfter).getTime() : null;
         log.warn("SYSTEMONE", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
         return {
           ok: false,
           status,
           error: `[${provider}/${model}] ${errorMsg}`,
           response: unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman),
+          retryAfterMs: Number.isFinite(retryAfterMs) ? retryAfterMs : null,
+          noAuth: false,
         };
       }
       if (excludeConnectionIds.size === 0) {
@@ -369,6 +414,8 @@ async function trySingleSystemoneModel({ body, modelStr, provider, model }) {
           status: HTTP_STATUS.BAD_REQUEST,
           error: `No credentials for provider: ${provider}`,
           response: errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`),
+          retryAfterMs: null,
+          noAuth: false,
         };
       }
       log.warn("SYSTEMONE", "No more accounts available", { provider });
@@ -377,6 +424,8 @@ async function trySingleSystemoneModel({ body, modelStr, provider, model }) {
         status: lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE,
         error: lastError || "All accounts unavailable",
         response: errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable"),
+        retryAfterMs: lastRetryAfterMs,
+        noAuth: lastNoAuth,
       };
     }
 
@@ -404,16 +453,40 @@ async function trySingleSystemoneModel({ body, modelStr, provider, model }) {
       };
     }
 
-    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
+    const { shouldFallback, cooldownMs } = await markAccountUnavailable(
+      credentials.connectionId,
+      result.status,
+      result.error,
+      provider,
+      model,
+      result.resetsAtMs ?? null
+    );
+
+    // noAuth lanes have no DB lock row; the caller parks them in RAM instead.
+    const retryAfterMs =
+      Number.isFinite(result.resetsAtMs) && result.resetsAtMs > Date.now()
+        ? result.resetsAtMs
+        : cooldownMs > 0
+          ? Date.now() + cooldownMs
+          : null;
 
     if (shouldFallback) {
       log.warn("AUTH", `Account ${credentials.connectionName} unavailable (${result.status}), trying fallback`);
       excludeConnectionIds.add(credentials.connectionId);
       lastError = result.error;
       lastStatus = result.status;
+      lastRetryAfterMs = retryAfterMs;
+      lastNoAuth = isNoAuth;
       continue;
     }
 
-    return { ok: false, status: result.status, error: result.error, response: result.response };
+    return {
+      ok: false,
+      status: result.status,
+      error: result.error,
+      response: result.response,
+      retryAfterMs,
+      noAuth: isNoAuth,
+    };
   }
 }

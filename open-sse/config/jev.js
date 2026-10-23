@@ -33,11 +33,16 @@ export const JEV_STATE_CHAR_BUDGET = 4000;
 export const JEV_TIMEOUT_MS = 3000;
 export const JEV_BREAKER_COOLDOWN_MS = 30000;
 
-// SystemOne auto (POST /v1/systemone, model:"auto") per-model cooldown.
+// SystemOne per-model cooldown (auto, explicit combos and single-model).
 // A candidate that fails with 429 stays out for 60s, 502/503/504/529 for 30s.
+// A provider-supplied reset hint (Retry-After / x-ratelimit-reset) always wins.
 // RAM-only, per process (same scope as providerLock.js). Success clears it.
 export const SYSTEMONE_COOLDOWN_429_MS = 60000;
 export const SYSTEMONE_COOLDOWN_5XX_MS = 30000;
+// noAuth (free "Public") lanes have no connection row, so the DB modelLock
+// never persists. Without an upstream reset hint, park the candidate for 30min
+// instead of retrying it on every request. Tune here, never in the handler.
+export const SYSTEMONE_COOLDOWN_NOAUTH_429_MS = 30 * 60 * 1000;
 
 // Explicit auto-discovery try order (alias/model strings). Applied as a final
 // rank over the free-first + priority sort in discoverSystemoneModels, so the

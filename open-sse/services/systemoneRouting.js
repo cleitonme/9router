@@ -11,10 +11,11 @@ import {
   SYSTEMONE_AUTO_ORDER,
   SYSTEMONE_COOLDOWN_429_MS,
   SYSTEMONE_COOLDOWN_5XX_MS,
+  SYSTEMONE_COOLDOWN_NOAUTH_429_MS,
 } from "../config/jev.js";
 
 // Re-export so handler/tests share one source without importing config directly.
-export { SYSTEMONE_COOLDOWN_429_MS, SYSTEMONE_COOLDOWN_5XX_MS };
+export { SYSTEMONE_COOLDOWN_429_MS, SYSTEMONE_COOLDOWN_5XX_MS, SYSTEMONE_COOLDOWN_NOAUTH_429_MS };
 
 export const SYSTEMONE_AUTO_MODEL = "auto";
 const MULTI_MODES = new Set(["combo", "auto"]);
@@ -43,26 +44,60 @@ export function systemoneCooldownTtlForStatus(status) {
   return 0;
 }
 
-/** Mark a candidate as cooling down. Returns expiry epoch-ms, or 0 when the status is not cooldownable. */
-export function markSystemoneModelCooling(candidate, status, now = Date.now()) {
-  const ttl = systemoneCooldownTtlForStatus(status);
-  if (!candidate || !(ttl > 0)) return 0;
-  const until = now + ttl;
-  systemoneCooldowns.set(systemoneCooldownKey(candidate), { until, status: Number(status) });
-  return until;
+/**
+ * Resolve the cooldown duration for a failed attempt.
+ * An upstream reset hint (Retry-After / x-ratelimit-reset) always wins;
+ * otherwise noAuth 429s use the dedicated long fallback, then the status default.
+ *
+ * @param {object} opts
+ * @param {number} [opts.status]
+ * @param {number|null} [opts.retryAfterMs] - epoch-ms expiry, when the upstream reported one
+ * @param {boolean} [opts.noAuth] - candidate runs on a no-credential "Public" lane
+ * @param {number} [opts.now]
+ * @returns {number} ttl in ms (0 = not cooldownable)
+ */
+export function resolveSystemoneCooldownTtlMs({ status, retryAfterMs = null, noAuth = false, now = Date.now() } = {}) {
+  if (Number.isFinite(retryAfterMs) && retryAfterMs > now) return retryAfterMs - now;
+  const s = Number(status);
+  if (noAuth && s === 429) return SYSTEMONE_COOLDOWN_NOAUTH_429_MS;
+  return systemoneCooldownTtlForStatus(s);
+}
+
+/**
+ * Mark a candidate as cooling down. Returns expiry epoch-ms, or 0 when the
+ * status is not cooldownable. `ttlMs`/`until` override the status default
+ * (used for upstream reset hints and noAuth lanes).
+ */
+export function markSystemoneModelCooling(candidate, status, now = Date.now(), { ttlMs, until } = {}) {
+  if (!candidate) return 0;
+  const explicitTtl = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : 0;
+  const defaultTtl = systemoneCooldownTtlForStatus(status);
+  const expiry =
+    Number.isFinite(until) && until > now
+      ? until
+      : now + (explicitTtl || defaultTtl);
+  if (!(expiry > now)) return 0;
+  systemoneCooldowns.set(systemoneCooldownKey(candidate), { until: expiry, status: Number(status) });
+  return expiry;
+}
+
+/** Live cooldown entry for a candidate, or null when not cooling. */
+export function getSystemoneCooldownInfo(candidate, now = Date.now()) {
+  if (!candidate) return null;
+  const key = systemoneCooldownKey(candidate);
+  const entry = systemoneCooldowns.get(key);
+  if (!entry) return null;
+  if (entry.until <= now) {
+    systemoneCooldowns.delete(key);
+    return null;
+  }
+  return { until: entry.until, status: entry.status, remainingMs: entry.until - now };
 }
 
 /** Remaining cooldown ms for a candidate, or 0 when not cooling. */
 export function getSystemoneCooldownRemaining(candidate, now = Date.now()) {
-  if (!candidate) return 0;
-  const key = systemoneCooldownKey(candidate);
-  const entry = systemoneCooldowns.get(key);
-  if (!entry) return 0;
-  if (entry.until <= now) {
-    systemoneCooldowns.delete(key);
-    return 0;
-  }
-  return entry.until - now;
+  const info = getSystemoneCooldownInfo(candidate, now);
+  return info ? info.remainingMs : 0;
 }
 
 /** True when the candidate is currently cooling down. */
@@ -77,7 +112,7 @@ export function clearSystemoneModelCooling(candidate) {
 }
 
 /**
- * Filter cooling candidates out of an auto try-list.
+ * Filter cooling candidates out of a SystemOne try-list (combo or auto).
  * Never returns [] from a non-empty input — when everything is cooling,
  * the full list is returned so the request still tries (fail-open).
  */

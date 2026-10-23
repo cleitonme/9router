@@ -16,11 +16,14 @@ import {
   clearSystemoneModelCooling,
   resetSystemoneCooldowns,
   systemoneCooldownTtlForStatus,
+  resolveSystemoneCooldownTtlMs,
+  getSystemoneCooldownInfo,
 } from "open-sse/services/systemoneRouting.js";
 import {
   SYSTEMONE_AUTO_ORDER,
   SYSTEMONE_COOLDOWN_429_MS,
   SYSTEMONE_COOLDOWN_5XX_MS,
+  SYSTEMONE_COOLDOWN_NOAUTH_429_MS,
 } from "open-sse/config/jev.js";
 import { handleSystemoneCore } from "open-sse/handlers/systemoneCore.js";
 
@@ -343,6 +346,37 @@ describe("systemone auto cooldown", () => {
     expect(systemoneCooldownTtlForStatus(400)).toBe(0);
     expect(systemoneCooldownTtlForStatus(401)).toBe(0);
     expect(systemoneCooldownTtlForStatus(500)).toBe(0);
+  });
+
+  it("honors an upstream reset hint before the status default", () => {
+    const now = 10_000;
+    expect(resolveSystemoneCooldownTtlMs({ status: 429, retryAfterMs: now + 5_000, now })).toBe(5_000);
+    expect(resolveSystemoneCooldownTtlMs({ status: 503, retryAfterMs: now + 7_000, now })).toBe(7_000);
+    // An already-expired hint must not shorten the default lock.
+    expect(resolveSystemoneCooldownTtlMs({ status: 429, retryAfterMs: now - 1, now })).toBe(
+      SYSTEMONE_COOLDOWN_429_MS
+    );
+  });
+
+  it("uses the long noAuth fallback for a 429 without a reset hint", () => {
+    expect(resolveSystemoneCooldownTtlMs({ status: 429, noAuth: true })).toBe(
+      SYSTEMONE_COOLDOWN_NOAUTH_429_MS
+    );
+    expect(resolveSystemoneCooldownTtlMs({ status: 502, noAuth: true })).toBe(
+      SYSTEMONE_COOLDOWN_5XX_MS
+    );
+    expect(resolveSystemoneCooldownTtlMs({ status: 400, noAuth: true })).toBe(0);
+  });
+
+  it("accepts explicit ttl/until overrides when marking", () => {
+    const t0 = 5_000;
+    const until = markSystemoneModelCooling("oc/jev-1.13-free", 429, t0, { ttlMs: 1_800_000 });
+    expect(until).toBe(t0 + 1_800_000);
+    const info = getSystemoneCooldownInfo("oc/jev-1.13-free", t0 + 1_000);
+    expect(info.remainingMs).toBe(1_799_000);
+    expect(info.status).toBe(429);
+    const fixed = markSystemoneModelCooling("oc/jev-1.13-free", 429, t0, { until: t0 + 42 });
+    expect(fixed).toBe(t0 + 42);
   });
 
   it("marks 429 candidates as cooling and expires them", () => {
