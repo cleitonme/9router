@@ -96,4 +96,28 @@ describe("stripUnsupportedParams", () => {
 
     expect(body.messages[0].reasoning_content).toBe("thinking...");
   });
+
+  it("renames max_tokens to max_completion_tokens for the openai provider", () => {
+    const body = { max_tokens: 50, temperature: 1 };
+
+    stripUnsupportedParams("openai", "gpt-6-luna", body);
+
+    expect(body).toEqual({ max_completion_tokens: 50, temperature: 1 });
+  });
+
+  it("keeps an explicit max_completion_tokens when both are sent to openai", () => {
+    const body = { max_tokens: 50, max_completion_tokens: 80 };
+
+    stripUnsupportedParams("openai", "gpt-6-luna", body);
+
+    expect(body).toEqual({ max_completion_tokens: 80 });
+  });
+
+  it("leaves max_tokens untouched for other providers", () => {
+    const body = { max_tokens: 50 };
+
+    stripUnsupportedParams("groq", "qwen/qwen3.6-27b", body);
+
+    expect(body).toEqual({ max_tokens: 50 });
+  });
 });
