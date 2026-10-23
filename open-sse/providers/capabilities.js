@@ -279,6 +279,16 @@ export const PROVIDER_CAPABILITIES = {
     "laguna-s-2.1":  { reasoning: true, thinkingFormat: "openai", contextWindow: 1000000, maxOutput: 32000 },
     "laguna-xs-2.1": { reasoning: true, thinkingFormat: "openai", contextWindow: 200000, maxOutput: 32000 },
   },
+  // OpenCode Free (oc) — the free lane's MiMo route is OpenRouter-backed and takes
+  // the plain OpenAI reasoning_effort enum verbatim (live probe on
+  // oc/mimo-v2.6-flash-free: none|minimal|low|medium|high|xhigh|max all 200, any
+  // other value 400 "Invalid option"; "none" really drops thinking — empty
+  // reasoning_content and reasoning_tokens 0). The global *mimo*v2.6* pattern
+  // describes Xiaomi's own API (DeepSeek-shaped `thinking` object, always on),
+  // which this lane ignores: `thinking.type:disabled` still streamed reasoning.
+  "opencode": {
+    "mimo-v2.6-flash-free": { vision: true, audioInput: true, videoInput: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1048576, maxOutput: 131072 },
+  },
   // Ollama Cloud — the generic *deepseek-v4* pattern misses the vision badge
   // the library page publishes for this model (text+image in, 1M context).
   // ponytail: thinkingFormat stays "deepseek" to preserve today's body shape;
