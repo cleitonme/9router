@@ -19,8 +19,16 @@ import { upstreamResponseHeaders } from "open-sse/utils/upstreamHeaders.js";
 import { classifyError, upstreamBackoffMs } from "open-sse/utils/classifyError.js";
 import { quarantineProxyPool } from "@/lib/network/poolQuarantine";
 import { blockUpstream, isUpstreamBlocked, blockLogicalProvider, isLogicalProviderBlocked, isGatewayBlocked } from "open-sse/services/providerLock.js";
-import { handleComboChat, handleFusionChat, detectRequiredCapabilities, reorderModelsForTier } from "open-sse/services/combo.js";
+import { handleComboChat, handleFusionChat, detectRequiredCapabilities, inferSmartTierMap } from "open-sse/services/combo.js";
 import { classifyTier } from "open-sse/services/jevClassifier.js";
+import {
+  buildStickySignature,
+  clearStickySession,
+  getStickyModel,
+  resolveStickyRouting,
+  setStickyModel,
+} from "open-sse/services/comboStickiness.js";
+import { resolveSessionIdentity } from "open-sse/utils/sessionManager.js";
 import { handleSystemone } from "./systemone.js";
 import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActiveAdapterStrategy } from "open-sse/services/capacityAdapter.js";
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
@@ -31,6 +39,104 @@ import { updateProviderCredentials, checkAndRefreshToken } from "../services/tok
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { blockGroq, isGroqTpmError, parseGroqResetsAtMs, GROQ_BLOCK_TTL_MS } from "open-sse/services/groqPreflight.js";
+
+/**
+ * Apply smart-combo routing for one request.
+ *
+ * Classifies the task into a complexity tier through System One, then applies
+ * the per-combo session policy (smart switch / strict lock / per-turn / custom)
+ * so the session's model stays stable and upstream prompt caches stay warm.
+ *
+ * Fail-open: a classifier miss keeps the current order (or the session lock)
+ * and the normal fallback ladder continues untouched.
+ *
+ * @returns {Promise<{ models: string[], sessionId: string|null, stickyModel: string|null }>}
+ */
+async function applySmartComboRouting({ comboName, comboStrategies, models, body, request, clientRawRequest, log }) {
+  const smartCfg = comboStrategies?.[comboName] || {};
+  const tierMap = smartCfg.smartTiers;
+  const classifierModel = smartCfg.smartClassifierModel;
+  const smartPolicy = smartCfg.sessionSticky === false
+    ? "per-turn"
+    : (smartCfg.smartPolicy || "smart");
+  const confidenceThreshold = typeof smartCfg.confidenceThreshold === "number"
+    ? smartCfg.confidenceThreshold
+    : 0.8;
+  const signature = buildStickySignature(smartPolicy, confidenceThreshold);
+
+  const session = resolveSessionIdentity({ headers: clientRawRequest?.headers, body });
+  const sessionId = session?.sessionId || null;
+  const stickyEnabled = smartPolicy !== "per-turn" && Boolean(sessionId);
+
+  const effectiveTierMap = tierMap && Object.keys(tierMap).length > 0
+    ? tierMap
+    : inferSmartTierMap(models);
+  // Tier maps may point at a model outside the combo (prepended as primary);
+  // allow those targets to be locked for the session too.
+  const allowedModels = [...models];
+  for (const value of Object.values(effectiveTierMap)) {
+    const candidate = typeof value === "string" ? value.trim() : "";
+    if (candidate && !allowedModels.includes(candidate)) allowedModels.push(candidate);
+  }
+
+  let stickyModel = stickyEnabled
+    ? getStickyModel(comboName, sessionId, allowedModels, signature)
+    : null;
+
+  let classified = null;
+  // Strict lock: reuse the session model without spending another classifier call.
+  if (!(smartPolicy === "strict" && stickyModel)) {
+    classified = await classifyTier({
+      body,
+      log,
+      classifierModel: classifierModel || undefined,
+      criteria: smartCfg.smartCriteria,
+      instructions: smartCfg.smartInstructions,
+      minConfidence: smartCfg.smartMinConfidence,
+      timeoutMs: smartCfg.smartTimeoutMs,
+      evaluateSystemone: (payload, model) => {
+        const headers = new Headers({ "Content-Type": "application/json" });
+        const authorization = request?.headers?.get?.("Authorization");
+        if (authorization) headers.set("Authorization", authorization);
+        return handleSystemone(new Request(new URL("/api/v1/systemone", request?.url || "http://localhost"), {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ ...payload, model }),
+        }));
+      },
+    });
+  }
+
+  const candidateModel = classified ? (effectiveTierMap[classified.tier] || null) : null;
+  const decision = resolveStickyRouting({
+    models,
+    candidateModel,
+    confidence: typeof classified?.confidence === "number" ? classified.confidence : null,
+    policy: smartPolicy,
+    threshold: confidenceThreshold,
+    stickyModel,
+    allowedModels,
+  });
+
+  if (decision.switched) {
+    log.info("CHAT", `Combo "${comboName}" smart-router switched ${stickyModel} → ${decision.stickyModel}`);
+  } else if (decision.reason === "strict-lock") {
+    log.info("CHAT", `Combo "${comboName}" smart-router strict lock → ${decision.stickyModel}`);
+  } else if (decision.reason === "keep") {
+    log.info("CHAT", `Combo "${comboName}" smart-router retained session model ${decision.stickyModel}`);
+  } else if (decision.reason === "initial" && decision.stickyModel) {
+    log.info("CHAT", `Combo "${comboName}" smart-routing selected ${decision.stickyModel}`);
+  } else if (decision.reason === "no-candidate") {
+    log.info("CHAT", `Combo "${comboName}" smart-routing: no confident tier — using default order`);
+  }
+
+  const nextSticky = stickyEnabled && decision.stickyModel && allowedModels.includes(decision.stickyModel)
+    ? decision.stickyModel
+    : null;
+  if (nextSticky) setStickyModel(comboName, sessionId, nextSticky, signature);
+
+  return { models: decision.models, sessionId, stickyModel: nextSticky };
+}
 
 /**
  * Handle chat completion request
@@ -190,44 +296,28 @@ export async function handleChat(request, clientRawRequest = null) {
 
     const comboStickyLimit = settings.comboStickyRoundRobinLimit;
 
-    // Smart routing: classify task complexity with Jev (System One) and reorder the
-    // combo so the tier-appropriate model leads. Fail-open — on any classifier
-    // miss we keep `augmentedModels` as-is and fall through to normal fallback.
-    // The availability/quota ladder + capability auto-switch below are untouched.
+    // Smart routing: classify task complexity with Jev (System One), pick the
+    // tier-appropriate model and keep it locked per session so prompt caches stay
+    // warm (policy: smart switch / strict lock / per-turn / custom).
+    // Fail-open — a classifier miss keeps the current/sticky order and the
+    // availability/quota ladder + capability auto-switch below are untouched.
     let effectiveStrategy = comboStrategy;
+    let stickyModel = null;
+    let stickySessionId = null;
     if (comboStrategy === "smart") {
-      const smartCfg = comboStrategies[modelStr] || {};
-      const tierMap = smartCfg.smartTiers;
-      const classifierModel = smartCfg.smartClassifierModel;
-      const classified = await classifyTier({
+      const routed = await applySmartComboRouting({
+        comboName: modelStr,
+        comboStrategies,
+        models: augmentedModels,
         body,
+        request,
+        clientRawRequest,
         log,
-        classifierModel: classifierModel || undefined,
-        criteria: smartCfg.smartCriteria,
-        instructions: smartCfg.smartInstructions,
-        minConfidence: smartCfg.smartMinConfidence,
-        timeoutMs: smartCfg.smartTimeoutMs,
-        evaluateSystemone: (payload, model) => {
-          const headers = new Headers({ "Content-Type": "application/json" });
-          const authorization = request.headers.get("Authorization");
-          if (authorization) headers.set("Authorization", authorization);
-          return handleSystemone(new Request(new URL("/api/v1/systemone", request.url), {
-            method: "POST",
-            headers,
-            body: JSON.stringify({ ...payload, model }),
-          }));
-        },
       });
-      if (classified) {
-        const reordered = reorderModelsForTier(augmentedModels, classified.tier, tierMap);
-        if (reordered[0] !== augmentedModels[0]) {
-          log.info("CHAT", `Combo "${modelStr}" smart-routing tier=${classified.tier} → ${reordered[0]}`);
-        }
-        augmentedModels.length = 0;
-        augmentedModels.push(...reordered);
-      } else {
-        log.info("CHAT", `Combo "${modelStr}" smart-routing: no confident tier — using default order`);
-      }
+      augmentedModels.length = 0;
+      augmentedModels.push(...routed.models);
+      stickyModel = routed.stickyModel;
+      stickySessionId = routed.sessionId;
       // Run the reordered chain through the normal fallback ladder.
       effectiveStrategy = "fallback";
     }
@@ -243,7 +333,12 @@ export async function handleChat(request, clientRawRequest = null) {
       log,
       comboName: modelStr,
       comboStrategy: effectiveStrategy,
-      comboStickyLimit
+      comboStickyLimit,
+      onModelFailure: stickyModel
+        ? (failedModel) => {
+            if (failedModel === stickyModel) clearStickySession(modelStr, stickySessionId);
+          }
+        : null,
     });
   }
 
@@ -309,7 +404,27 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
 
       const comboStickyLimit = chatSettings.comboStickyRoundRobinLimit;
-      log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
+      let effectiveStrategy = comboStrategy;
+      let stickyModel = null;
+      let stickySessionId = null;
+      if (comboStrategy === "smart") {
+        const routed = await applySmartComboRouting({
+          comboName: modelStr,
+          comboStrategies,
+          models: augmentedModels,
+          body,
+          request,
+          clientRawRequest,
+          log,
+        });
+        augmentedModels.length = 0;
+        augmentedModels.push(...routed.models);
+        stickyModel = routed.stickyModel;
+        stickySessionId = routed.sessionId;
+        effectiveStrategy = "fallback";
+      }
+
+      log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}${effectiveStrategy !== comboStrategy ? `→${effectiveStrategy}` : ""}, sticky: ${comboStickyLimit})`);
       return handleComboChat({
         body,
         models: augmentedModels,
@@ -319,8 +434,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         ),
         log,
         comboName: modelStr,
-        comboStrategy,
-        comboStickyLimit
+        comboStrategy: effectiveStrategy,
+        comboStickyLimit,
+        onModelFailure: stickyModel
+          ? (failedModel) => {
+              if (failedModel === stickyModel) clearStickySession(modelStr, stickySessionId);
+            }
+          : null,
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });

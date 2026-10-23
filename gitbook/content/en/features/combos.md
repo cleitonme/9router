@@ -118,6 +118,33 @@ Cursor/Cline/Any tool:
 
 ---
 
+## Combo Routing Strategies
+
+On **Dashboard → Combos** you can choose how models inside each combo are selected:
+
+### 1. Fallback (default)
+Tries models sequentially in the configured order. The first model is called first; on a rate limit (429) or transient error (502/503/504) 9Router falls back to the next model.
+
+### 2. Round Robin
+Rotates models across incoming requests to distribute load. A sticky limit controls how many calls a model receives before rotating.
+
+### 3. Smart (System One)
+Uses a **System One decision model** (configurable per combo, default `oc/jev-1.13-free`) to classify the task into a complexity tier (`SIMPLE`, `MEDIUM`, `COMPLEX`, `REASONING`) and moves the tier's model to the front. The availability/quota ladder and capability auto-switch still run afterwards.
+
+Session policies keep the chosen model stable across turns so upstream prompt caches stay warm:
+
+- **Smart Switch (default)**: remembers the session model and only switches when the tier changes with confidence ≥ 80%. Lower confidence keeps the current model.
+- **Strict Lock**: evaluates the router once on the first turn, then locks that model for the session. Follow-up turns add no router call or latency.
+- **Per-Turn**: evaluates the router on every prompt with no session stickiness.
+- **Custom Threshold**: Smart Switch with a confidence threshold between 50% and 95%.
+
+Stickiness is fail-open: on timeout/error the combo keeps its current order (or the locked model), and a failed model is dropped from the session so the next turn re-evaluates. Locks live in memory per process (2h TTL) and are invalidated when the combo policy changes.
+
+### 4. Fusion
+Queries all panel models in parallel, then a judge model synthesizes one final answer. Best for complex reasoning, but bills every panel model plus the judge (N+1 calls).
+
+---
+
 ## Cursor / Claude Default Combos
 
 Cursor and Claude Code send **unprefixed** model IDs (`composer-2.5`, `claude-opus-5`, `opus`), while 9Router routes with provider prefixes (`cu/composer-2.5`, `cc/claude-opus-5`). Default combo generators bridge that gap.

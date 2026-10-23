@@ -10,6 +10,7 @@ import { classifyError } from "../utils/classifyError.js";
 import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
+import { clearStickySession } from "./comboStickiness.js";
 
 // Hard capabilities = input modalities; missing one drops request data (e.g. image
 // stripped). Must be prioritized. Soft (e.g. search) only degrades a feature.
@@ -295,8 +296,13 @@ export function getRotatedModels(models, comboName, strategy, stickyLimit = 1) {
  * @param {string} [comboName] - Combo name to reset; omit to clear all
  */
 export function resetComboRotation(comboName) {
-  if (comboName) comboRotationState.delete(comboName);
-  else comboRotationState.clear();
+  if (comboName) {
+    comboRotationState.delete(comboName);
+    clearStickySession(comboName);
+  } else {
+    comboRotationState.clear();
+    clearStickySession();
+  }
 }
 
 /**
@@ -369,9 +375,10 @@ export function isZeroContentResponse(data) {
  * @param {string} [options.comboName] - Name of the combo (for round-robin tracking)
  * @param {string} [options.comboStrategy] - Strategy: "fallback" or "round-robin"
  * @param {number|string} [options.comboStickyLimit=1] - Requests per combo model before switching
+ * @param {Function} [options.onModelFailure] - Called with the model string when a candidate fails
  * @returns {Promise<Response>}
  */
-export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true }) {
+export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true, onModelFailure = null }) {
   // Apply rotation strategy if enabled
   let rotatedModels = getRotatedModels(models, comboName, comboStrategy, comboStickyLimit);
 
@@ -386,6 +393,15 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       rotatedModels = reordered;
     }
   }
+
+  const notifyModelFailure = (modelStr) => {
+    if (typeof onModelFailure !== "function") return;
+    try {
+      onModelFailure(modelStr);
+    } catch {
+      // fail-open: sticky cleanup must never break the fallback ladder
+    }
+  };
   
   let lastError = null;
   let earliestRetryAfter = null;
@@ -401,6 +417,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       ? (isProviderBlocked(modelProvider) || isLogicalProviderBlocked(modelProvider) || isGatewayBlocked(modelProvider))
       : null;
     if (blockEntry) {
+      notifyModelFailure(modelStr);
       const next = i + 1 < rotatedModels.length ? rotatedModels[i + 1] : "none";
       lastError = `provider ${modelProvider} blocked (${blockEntry.reason || "rate limit"})`;
       if (!lastStatus) lastStatus = 429;
@@ -422,6 +439,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
               const peekBody = await result.clone().json();
               if (isZeroContentResponse(peekBody)) {
                 log.warn("COMBO", `Model ${modelStr} returned HTTP 200 with zero usable content, falling back to next model`);
+                notifyModelFailure(modelStr);
                 lastError = "Zero usable content";
                 lastStatus = 200;
                 continue;
@@ -478,6 +496,10 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         return result;
       }
 
+      // The session lock (smart routing) must not survive a failed candidate:
+      // the next turn re-evaluates instead of retrying a broken model.
+      notifyModelFailure(modelStr);
+
       // For transient errors (503/502/504), wait for cooldown before falling through
       // so a briefly-overloaded provider gets a chance to recover rather than being
       // skipped immediately (fixes: combo falls through on transient 503)
@@ -503,6 +525,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       log.warn("COMBO", `Model ${modelStr} failed (fallback_reason: ${fallbackReason}), trying next ${i + 2}/${rotatedModels.length}: ${nextModel}`, { status: result.status });
     } catch (error) {
       // Catch unexpected exceptions to ensure fallback continues
+      notifyModelFailure(modelStr);
       lastError = error.message || String(error);
       if (!lastStatus) lastStatus = 500;
       log.warn("COMBO", `Model ${modelStr} threw error, trying next`, { error: lastError });

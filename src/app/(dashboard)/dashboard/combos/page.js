@@ -5,7 +5,7 @@ import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, us
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { restrictToVerticalAxis, restrictToParentElement } from "@dnd-kit/modifiers";
-import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, ConfirmModal, CapacityBadges, Select, Toggle } from "@/shared/components";
+import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, ConfirmModal, CapacityBadges, Select, Toggle, SmartPolicyModal } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
@@ -53,6 +53,18 @@ const STRATEGY_OPTIONS = [
   { value: "fusion", label: "Fusion — panel + judge" },
   { value: "smart", label: "Smart — Jev complexity routing" },
 ];
+
+function getStickyPolicyLabel(strategy = {}) {
+  const policy = strategy.smartPolicy || (strategy.sessionSticky === false ? "per-turn" : "smart");
+  if (policy === "strict") return "Strict Lock";
+  if (policy === "per-turn") return "Per-Turn";
+  if (policy === "custom") {
+    const raw = Number(strategy.confidenceThreshold);
+    const pct = Number.isFinite(raw) ? Math.round(raw <= 1 ? raw * 100 : raw) : 80;
+    return `Custom ≥${pct}%`;
+  }
+  return "Smart Switch";
+}
 
 export default function CombosPage() {
   const [combos, setCombos] = useState([]);
@@ -410,7 +422,7 @@ export default function CombosPage() {
             <li><span className="font-medium text-text-main">Fallback</span> — tries models in order (next on failure)</li>
             <li><span className="font-medium text-text-main">Round Robin</span> — rotates models across requests to spread load</li>
             <li><span className="font-medium text-text-main">Fusion</span> — queries all models in parallel, then a judge synthesizes one answer. Best quality, but costs the most: every request bills all panel models + the judge (N+1 calls)</li>
-            <li><span className="font-medium text-text-main">Smart</span> — uses a System One classifier to pick the lead model by task complexity, then falls back normally</li>
+            <li><span className="font-medium text-text-main">Smart</span> — uses a System One classifier to pick the lead model by task complexity, then falls back normally. Session policies (Smart Switch, Strict Lock, Per-Turn, Custom) keep the model stable across turns to retain prompt cache</li>
           </ul>
           <p className="hidden text-xs text-text-muted mt-3 max-w-2xl">
             <span className="font-medium text-text-main">Cursor / Claude Default</span> create combos named exactly like those clients&apos; model IDs (e.g. <code className="font-mono">composer-2.5</code>, <code className="font-mono">opus</code>), seeded with the matching <code className="font-mono">cu/…</code> or <code className="font-mono">cc/…</code> route so traffic can hit 9router without the prefix.
@@ -664,11 +676,13 @@ const fmtK = (n) => {
 function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], copied, onCopy, onEdit, onDelete, onRefreshIntelligence, strategy = {}, onSetStrategy, selected = false, onToggleSelect }) {
   const [showJudgeSelect, setShowJudgeSelect] = useState(false);
   const [showClassifierSelect, setShowClassifierSelect] = useState(false);
+  const [showPolicyModal, setShowPolicyModal] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const current = strategy.fallbackStrategy || "fallback";
   const intelligence = combo.config?.type === "intelligence" ? combo.config : null;
   const judge = strategy.judgeModel || "";
   const classifier = strategy.smartClassifierModel || JEV_DEFAULT_CLASSIFIER_MODEL;
+  const stickyPolicy = getStickyPolicyLabel(strategy);
   const isFusion = current === "fusion";
   const isSmart = current === "smart";
   // The synced catalog is server-only, so resolving here would fall back to the
@@ -759,6 +773,14 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
                     <span className="material-symbols-outlined text-[13px]">close</span>
                   </button>
                 )}
+                <button
+                  onClick={() => setShowPolicyModal(true)}
+                  className="inline-flex items-center gap-1 rounded border border-border/70 bg-black/[0.02] dark:bg-white/[0.02] px-2 py-0.5 text-[11px] text-text-main hover:border-primary/50 hover:bg-primary/5 transition-colors"
+                  title="Configure session stickiness and prompt cache retention"
+                >
+                  <span className="material-symbols-outlined text-[13px] text-text-muted">tune</span>
+                  <span className="font-medium">{stickyPolicy}</span>
+                </button>
               </div>
             )}
             {/* Fusion: judge picker (Auto = first model) */}
@@ -868,6 +890,18 @@ function ComboCard({ combo, getCaps, comboByName = {}, activeProviders = [], cop
           title="Select Judge Model"
           addedModelValues={judge ? [judge] : []}
           closeOnSelect={true}
+        />
+      )}
+
+      {/* Smart: session stickiness / prompt cache policy */}
+      {showPolicyModal && (
+        <SmartPolicyModal
+          isOpen={showPolicyModal}
+          onClose={() => setShowPolicyModal(false)}
+          comboName={combo.name}
+          currentPolicy={strategy.smartPolicy || (strategy.sessionSticky === false ? "per-turn" : "smart")}
+          currentThreshold={strategy.confidenceThreshold ?? 0.8}
+          onSave={onSetStrategy}
         />
       )}
     </Card>
