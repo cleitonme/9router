@@ -369,11 +369,17 @@ export default function ProvidersPage() {
 
   // Web Cookie: providers authenticated by a pasted browser/session cookie
   // (connections are stored with authType "cookie" — see POST /api/providers).
+  // Unlike API Key / LLM lists, this section does NOT require serviceKinds to
+  // include "llm": most web-cookie providers are image/video only and still
+  // need a place to add their cookie. Providers parked with an empty
+  // serviceKinds array (e.g. perplexity-web) stay out of every dashboard list.
+  const isParkedWebCookie = (info) =>
+    Array.isArray(info.serviceKinds) && info.serviceKinds.length === 0;
   const webCookieEntries = Object.entries(WEB_COOKIE_PROVIDERS)
     .filter(
       ([key, info]) =>
         !info.hidden &&
-        (info.serviceKinds ?? ["llm"]).includes("llm") &&
+        !isParkedWebCookie(info) &&
         matchSearch(info.name) &&
         matchStatus(getProviderStats(key, "cookie"), info.noAuth),
     )
@@ -590,6 +596,47 @@ export default function ProvidersPage() {
       </div>
       )}
 
+      {/* Web Cookie Providers — browser/session cookies instead of API keys */}
+      {webCookieEntries.length > 0 && (
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <h2 className="text-lg sm:text-xl font-semibold flex items-center gap-2 leading-tight">
+            Web Cookie Providers{" "}
+          </h2>
+          <button
+            onClick={() => handleBatchTest("cookie")}
+            disabled={!!testingMode}
+            className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 ${
+              testingMode === "cookie"
+                ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
+                : "bg-bg border-border text-text-muted hover:text-text-main hover:border-primary/40"
+            }`}
+            title="Test all Web Cookie connections"
+            aria-label="Test all Web Cookie connections"
+          >
+            <span
+              className={`material-symbols-outlined text-[14px]${testingMode === "cookie" ? " animate-spin" : ""}`}
+            >
+              play_arrow
+            </span>
+            {testingMode === "cookie" ? "Testing..." : "Test All"}
+          </button>
+        </div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
+          {webCookieEntries.map(([key, info]) => (
+            <ApiKeyProviderCard
+              key={key}
+              providerId={key}
+              provider={info}
+              stats={getProviderStats(key, "cookie")}
+              authType="cookie"
+              onToggle={(active) => handleToggleProvider(key, "cookie", active)}
+            />
+          ))}
+        </div>
+      </div>
+      )}
+
       {/* API Key Providers — fixed list */}
       {apikeyEntries.length > 0 && (
       <div className="flex flex-col gap-4">
@@ -625,16 +672,6 @@ export default function ProvidersPage() {
               stats={getProviderStats(key, "apikey")}
               authType="apikey"
               onToggle={(active) => handleToggleProvider(key, "apikey", active)}
-            />
-          ))}
-          {webCookieEntries.map(([key, info]) => (
-            <ApiKeyProviderCard
-              key={key}
-              providerId={key}
-              provider={info}
-              stats={getProviderStats(key, "cookie")}
-              authType="cookie"
-              onToggle={(active) => handleToggleProvider(key, "cookie", active)}
             />
           ))}
         </div>
@@ -897,6 +934,11 @@ function ApiKeyProviderCard({
                         Messages
                       </Badge>
                     )}
+                    {authType === "cookie" && (
+                      <Badge variant="default" size="sm">
+                        Cookie
+                      </Badge>
+                    )}
                     {errorTime && (
                       <span className="text-text-muted">{errorTime}</span>
                     )}
@@ -968,6 +1010,7 @@ function ProviderTestResultsView({ results }) {
       oauth: "OAuth",
       free: "Free",
       apikey: "API Key",
+      cookie: "Cookie",
       provider: "Provider",
       all: "All",
     }[mode] || mode;
