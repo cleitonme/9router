@@ -81,6 +81,7 @@ export const PAYMENT_REQUIRED_PATTERNS = [
   "payment required",
   "insufficient balance",
   "insufficient funds",
+  "credit balance is too low",
   "no resource package",
   "not included in",
   "not included in your",

@@ -5,6 +5,7 @@
 // looked like the same failure in unrelated sessions.
 import { describe, expect, it } from "vitest";
 import { checkFallbackError } from "../../open-sse/services/accountFallback.js";
+import { PAYMENT_REQUIRED_COOLDOWN_MS } from "../../open-sse/config/errorConfig.js";
 
 describe("checkFallbackError — request-scoped vs account-scoped failures", () => {
   it("does not cool the account down for a 400 caused by the request", () => {
@@ -40,6 +41,19 @@ describe("checkFallbackError — request-scoped vs account-scoped failures", () 
     expect(checkFallbackError(400, message, 1)).toEqual({
       shouldFallback: true, cooldownMs: 4000, newBackoffLevel: 2,
     });
+  });
+
+  it("falls back with an account-scoped lock for Anthropic credit-balance wording", () => {
+    for (const message of [
+      "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+      "CREDIT BALANCE IS TOO LOW",
+    ]) {
+      const result = checkFallbackError(400, message);
+      expect(result.shouldFallback).toBe(true);
+      expect(result.classification?.type).toBe("payment_required");
+      expect(result.classification?.scope).toBe("account");
+      expect(result.cooldownMs).toBe(PAYMENT_REQUIRED_COOLDOWN_MS);
+    }
   });
 
   it("does not fall back for an ordinary bad request", () => {
