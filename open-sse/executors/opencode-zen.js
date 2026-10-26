@@ -1,7 +1,10 @@
 import crypto from "node:crypto";
 import { DefaultExecutor } from "./default.js";
+import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { isMuseSparkModel, isOpencodeFreeTierModel } from "../providers/models/helpers.js";
+import { applyEnvFingerprint } from "../utils/opencodeFingerprint.js";
+import { opencodeTlsFetch } from "../services/opencodeTlsClient.js";
 import {
   normalizeResponsesInput,
   clampResponsesCallId,
@@ -43,7 +46,6 @@ function unstableRandom() {
 // Upstream decodes it and rejects a non-small counter with 403 FreeTierError
 // (live probes: counter 0–16 pass, >=100 fail), so the counter must stay real.
 const SESSION_PREFIX_MASK = (1n << 48n) - 1n;
-const SESSION_TIME_MASK = (1n << 36n) - 1n;
 
 function descendingTimeHex(time, counterValue) {
   return (~(BigInt(time) * 0x1000n + BigInt(counterValue)) & SESSION_PREFIX_MASK)
@@ -66,22 +68,38 @@ export function generateRequestId(timestamp = Date.now()) {
   return `msg_${time}${unstableRandom()}`;
 }
 
+// Upstream decodes the prefix timestamp and refuses sessions minted outside the
+// free-tier window; digest-derived times are uniform over 2^36 ms, so most were
+// refused (live probes 2026-10-26: Date.now() passed 10/10, digest-derived 1/10).
+// Mint at the current time and memoize per conversation to keep one stable id.
+const translatedOpencodeZenSessions = new Map();
+const MAX_TRANSLATED_SESSIONS = 5000;
+const translatedSessionCleanup = setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of translatedOpencodeZenSessions) {
+    if (now - entry.lastUsed > MEMORY_CONFIG.sessionTtlMs) {
+      translatedOpencodeZenSessions.delete(key);
+    }
+  }
+}, MEMORY_CONFIG.sessionCleanupIntervalMs);
+if (translatedSessionCleanup.unref) translatedSessionCleanup.unref();
+
 export function translateSessionId(sessionId, clientTool = "") {
   if (typeof sessionId === "string" && OPENCODE_SESSION_RE.test(sessionId.trim())) {
     return sessionId.trim();
   }
-  const digest = crypto
-    .createHash("sha256")
-    .update(`opencode\0${clientTool || "generic"}\0${sessionId || ""}`)
-    .digest();
-  // Deterministic time field from the digest, counter pinned to 1 (what the CLI sends).
-  const time = BigInt(`0x${digest.subarray(0, 5).toString("hex")}`) & SESSION_TIME_MASK;
-  const timeHex = descendingTimeHex(time, 1);
-  let randomPart = "";
-  for (let i = 6; i < 20; i++) {
-    randomPart += BASE62_CHARS[digest[i] % 62];
+  const key = `${clientTool || "generic"}\0${sessionId || ""}`;
+  const existing = translatedOpencodeZenSessions.get(key);
+  if (existing) {
+    existing.lastUsed = Date.now();
+    return existing.sessionId;
   }
-  return `ses_${timeHex}${randomPart}`;
+  const translated = `ses_${descendingTimeHex(Date.now(), 1)}${unstableRandom()}`;
+  if (translatedOpencodeZenSessions.size >= MAX_TRANSLATED_SESSIONS) {
+    translatedOpencodeZenSessions.delete(translatedOpencodeZenSessions.keys().next().value);
+  }
+  translatedOpencodeZenSessions.set(key, { sessionId: translated, lastUsed: Date.now() });
+  return translated;
 }
 
 function toolNameOf(tool) {
@@ -262,7 +280,16 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
 
   async execute(args) {
     const credentials = this.prepareRequestCredentials(args);
-    return super.execute({ ...args, credentials });
+    // Free-tier models share the opencode.ai gate that keys on the TLS
+    // ClientHello; paid models keep the default transport untouched.
+    const directFetch = isOpencodeFreeTierModel(args.model)
+      ? (url, options) => opencodeTlsFetch(url, {
+        method: options.method,
+        headers: options.headers,
+        body: options.body,
+      }, { signal: options.signal })
+      : null;
+    return super.execute({ ...args, credentials, ...(directFetch ? { directFetch } : {}) });
   }
 
   buildHeaders(credentials, stream = true, url, model) {
@@ -301,6 +328,7 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
     if (out && typeof out === "object") out.stream = true;
     if (!isResponsesModel(model || body?.model)) {
       ensureChatFingerprintTools(out);
+      if (isOpencodeFreeTierModel(model || body?.model)) applyEnvFingerprint(out, false);
       return out;
     }
     const normalized = normalizeResponsesInput(out.input);
@@ -327,6 +355,7 @@ export class OpenCodeZenExecutor extends DefaultExecutor {
     ensureResponsesFingerprintTools(out);
     normalizeResponsesTools(out);
     sanitizeResponsesItems(out);
+    if (isOpencodeFreeTierModel(model || body?.model)) applyEnvFingerprint(out, true);
     return out;
   }
 }
