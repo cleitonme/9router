@@ -311,8 +311,12 @@ export const PROVIDER_CAPABILITIES = {
   // reasoning_content and reasoning_tokens 0). The global *mimo*v2.6* pattern
   // describes Xiaomi's own API (DeepSeek-shaped `thinking` object, always on),
   // which this lane ignores: `thinking.type:disabled` still streamed reasoning.
+  // deepseek-v4.1-flash-free: the backend rejects requests above ~330k prompt
+  // tokens (issue #5097). Cap the published context window at 330000 so clients
+  // (VS Code Copilot etc.) compact correctly instead of hard-failing mid-session.
   "opencode": {
     "mimo-v2.6-flash-free": { vision: true, audioInput: true, videoInput: true, reasoning: true, thinkingFormat: "openai", thinkingCanDisable: true, contextWindow: 1048576, maxOutput: 131072 },
+    "deepseek-v4.1-flash-free": { vision: true, reasoning: true, thinkingFormat: "deepseek", contextWindow: 330000, maxOutput: 128000 },
   },
   // Ollama Cloud — the generic *deepseek-v4* pattern misses the vision badge
   // the library page publishes for this model (text+image in, 1M context).
