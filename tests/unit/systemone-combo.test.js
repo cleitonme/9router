@@ -279,7 +279,7 @@ describe("systemone auto discovery (zero-config)", () => {
     expect(pickSystemoneDefaultModel([])).toBeNull();
   });
 
-  it("applies the explicit SYSTEMONE_AUTO_ORDER (cloudflare before v1m, ts last)", async () => {
+  it("applies the explicit SYSTEMONE_AUTO_ORDER (cloudflare before v1m, nace last)", async () => {
     const full = [
       {
         id: "opencode",
@@ -323,6 +323,13 @@ describe("systemone auto discovery (zero-config)", () => {
         priority: 50,
         systemoneConfig: { baseUrl: "https://api.typesafe.ai/v1/systemone" },
         models: [{ id: "jev-latest", kind: "systemone" }],
+      },
+      {
+        id: "nace",
+        alias: "nace",
+        priority: 48,
+        systemoneConfig: { baseUrl: "https://console.nace.ai/v1/systemone" },
+        models: [{ id: "drex-max", kind: "systemone" }],
       },
     ];
     const models = await discoverSystemoneModels({

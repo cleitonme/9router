@@ -55,6 +55,7 @@ export const SYSTEMONE_AUTO_ORDER = [
   "v1m/rev-latest",
   "ocz/jev-1.13-free",
   "ts/jev-latest",
+  "nace/drex-max",
 ];
 
 // Below this confidence, preserve the combo's existing order.

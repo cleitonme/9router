@@ -10,6 +10,7 @@ import {
   getNousApiKeyValidationError,
   isNousApiKeyAccepted,
 } from "open-sse/services/nous.js";
+import { probeSystemoneProvider } from "open-sse/services/systemoneValidation.js";
 import { normalizeProviderId } from "@/lib/providerNormalization";
 
 // Probe a webSearch/webFetch provider using its searchConfig/fetchConfig.
@@ -255,6 +256,17 @@ export async function POST(request) {
           valid: mediaResult,
           error: mediaResult ? null : "Invalid API key",
         });
+      }
+
+      // Generic probe for System One-only providers (nace, v1m, typesafe)
+      const systemoneResult = await probeSystemoneProvider({
+        provider,
+        model: getDefaultModel(AI_PROVIDERS[provider]?.alias || provider),
+        apiKey,
+        providerSpecificData,
+      });
+      if (systemoneResult !== null) {
+        return NextResponse.json(systemoneResult);
       }
 
       switch (provider) {

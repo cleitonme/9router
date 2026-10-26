@@ -4,26 +4,11 @@ import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { PROVIDER_MEDIA } from "../providers/index.js";
 import { getModelUpstreamId } from "../config/providerModels.js";
 import { generateSessionId } from "../executors/opencode-zen.js";
-import { sanitizeSystemoneUpstreamBody } from "../services/systemoneRouting.js";
+import { buildSystemoneUrl, sanitizeSystemoneUpstreamBody } from "../services/systemoneRouting.js";
+
+export { buildSystemoneUrl };
 
 const OPENCODE_PROVIDERS = new Set(["opencode", "opencode-zen"]);
-
-/**
- * Resolve the System One URL. A saved host override is joined with the registry
- * `path` (e.g. "/v1/systemone") without doubling a "/v1" or "/v1/systemone" the
- * user already included. Without `path`, the override is used as a full URL.
- */
-export function buildSystemoneUrl(override, cfg) {
-  const base = typeof override === "string" ? override.trim() : "";
-  if (!base) return cfg?.baseUrl;
-  if (!cfg?.path) return base;
-  const host = base.replace(/\/+$/, "");
-  const path = cfg.path.replace(/\/+$/, "");
-  if (host.endsWith(path)) return host;
-  const prefix = path.slice(0, path.lastIndexOf("/"));
-  if (prefix && host.endsWith(prefix)) return host + path.slice(prefix.length);
-  return host + path;
-}
 
 /**
  * Core System One (Jev) handler — native decision payload pass-through.

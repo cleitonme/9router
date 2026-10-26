@@ -39,10 +39,11 @@ describe("typesafe official System One provider", () => {
     });
     expect(models[0]).toBe("oc/jev-1.13-free");
     expect(models).toContain("ts/jev-latest");
-    // priority order among configured: openrouter(10) < v1m(45) < typesafe(50) < ocz(205)
+    // priority order among configured: openrouter(10) < v1m(45) < typesafe(50)
     const idx = (m) => models.indexOf(m);
     expect(idx("ts/jev-latest")).toBeGreaterThan(idx("v1m/rev-latest"));
-    expect(idx("ts/jev-latest")).toBeLessThan(idx("ocz/jev-1.13-free"));
+    // explicit SYSTEMONE_AUTO_ORDER ranks ocz before ts
+    expect(idx("ts/jev-latest")).toBeGreaterThan(idx("ocz/jev-1.13-free"));
   });
 
   it("is skipped by discovery without credentials", async () => {
