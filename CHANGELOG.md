@@ -17,6 +17,9 @@
 - **SystemOne**: Ollama Cloud (`ollama`) and Ollama Local (`ollama-local`) expose System One lanes — `clef`/`clef-flash`/`clef:cloud` decision models on `https://ollama.com/v1/systemone` and `http://localhost:11434/v1/systemone`, with a saved host joined through the registry `path` without duplicating `/v1`; the OpenCode session headers are now sent only to the OpenCode/Zen lanes
 - **SystemOne**: fix auto/combo returning the routing envelope on HTTP 200 (moved `answers` under `data`, breaking clients that only swap the model) — auto/combo now return the native upstream body by default with routing metadata in `x-9router-*` headers; envelope is opt-in via `"envelope": true` or `?envelope=1`; total failure returns the standard `{error}` shape
 
+## Fixes
+- **NVIDIA NIM**: normalize assistant `reasoning` aliases to `reasoning_content` before forwarding, avoiding NIM's duplicate-field 400 when clients send both.
+
 # v0.5.95 (2026-10-01)
 
 ## Features
