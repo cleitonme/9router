@@ -1021,6 +1021,7 @@ docker stop 9router && docker rm 9router
 | `DATA_DIR` | `~/.9router` | メインアプリのデータベース格納場所（`db.json`） |
 | `PORT` | フレームワークデフォルト | サービスポート（例では`20128`） |
 | `HOSTNAME` | フレームワークデフォルト | バインドホスト（Dockerデフォルトは`0.0.0.0`） |
+| `KEEP_ALIVE_TIMEOUT` | `65000` | `custom-server.js` 経由のアイドル HTTP ソケットタイムアウト（ミリ秒）。`0` で無効化 |
 | `NODE_ENV` | ランタイムデフォルト | デプロイ時は`production`に設定 |
 | `BASE_URL` | `http://localhost:20128` | クラウド同期ジョブで使用されるサーバーサイド内部ベースURL |
 | `CLOUD_URL` | `https://9router.com` | サーバーサイドのクラウド同期エンドポイントベースURL |

@@ -539,6 +539,7 @@ Environment variables actively used by code:
 - Sync/cloud URLing: `NEXT_PUBLIC_BASE_URL`, `NEXT_PUBLIC_CLOUD_URL`
 - Outbound proxy: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and lowercase variants
 - Platform/runtime helpers (not app-specific config): `APPDATA`, `NODE_ENV`, `PORT`, `HOSTNAME`
+- HTTP server: `KEEP_ALIVE_TIMEOUT` (idle socket timeout in ms applied by `custom-server.js`; default `65000`, `0` disables it)
 
 ## Known Architectural Notes
 

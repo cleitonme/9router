@@ -18,6 +18,7 @@
 - **SystemOne**: fix auto/combo returning the routing envelope on HTTP 200 (moved `answers` under `data`, breaking clients that only swap the model) — auto/combo now return the native upstream body by default with routing metadata in `x-9router-*` headers; envelope is opt-in via `"envelope": true` or `?envelope=1`; total failure returns the standard `{error}` shape
 
 ## Fixes
+- **Server**: raise the idle HTTP keep-alive timeout to 65s by default in `custom-server.js` (override with `KEEP_ALIVE_TIMEOUT` in ms, `0` disables it) so pooled client/proxy connections stop being dropped after Node's 5s default; an explicit `keepAliveTimeout` server option still wins (#5264)
 - **NVIDIA NIM**: normalize assistant `reasoning` aliases to `reasoning_content` before forwarding, avoiding NIM's duplicate-field 400 when clients send both.
 
 # v0.5.95 (2026-10-01)

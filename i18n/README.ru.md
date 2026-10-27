@@ -1024,6 +1024,7 @@ docker stop 9router && docker rm 9router
 | `DATA_DIR` | `~/.9router` | Расположение основной БД приложения (`db.json`) |
 | `PORT` | framework default | Порт сервиса (`20128` в примерах) |
 | `HOSTNAME` | framework default | Bind host (Docker по умолчанию `0.0.0.0`) |
+| `KEEP_ALIVE_TIMEOUT` | `65000` | Тайм-аут простоя HTTP-сокета в мс через `custom-server.js`; `0` отключает его |
 | `NODE_ENV` | runtime default | Установите `production` для развёртывания |
 | `BASE_URL` | `http://localhost:20128` | Внутренний серверный базовый URL для задач облачной синхронизации |
 | `CLOUD_URL` | `https://9router.com` | Серверный базовый URL эндпоинта облачной синхронизации |

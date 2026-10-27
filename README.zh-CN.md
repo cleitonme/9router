@@ -1098,6 +1098,7 @@ docker stop 9router && docker rm 9router
 | `DATA_DIR` | `~/.9router` | 主应用数据库位置（`db.json`） |
 | `PORT` | 框架默认值 | 服务端口（示例中为 `20128`） |
 | `HOSTNAME` | 框架默认值 | 绑定主机（Docker 默认为 `0.0.0.0`） |
+| `KEEP_ALIVE_TIMEOUT` | `65000` | 通过 `custom-server.js` 设置的 HTTP 套接字空闲超时（毫秒）；`0` 表示禁用 |
 | `NODE_ENV` | 运行时默认值 | 设置 `production` 用于部署 |
 | `BASE_URL` | `http://localhost:20128` | 云同步任务使用的服务端内部基础 URL |
 | `CLOUD_URL` | `https://9router.com` | 服务端云同步端点基础 URL |
