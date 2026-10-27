@@ -15,7 +15,8 @@ const NAV_STRUCTURE = [
     items: [
       { key: "subscription", slug: "providers/subscription" },
       { key: "cheap", slug: "providers/cheap" },
-      { key: "free", slug: "providers/free" }
+      { key: "free", slug: "providers/free" },
+      { key: "webCookie", slug: "providers/web-cookie" }
     ]
   },
   {
@@ -65,6 +66,7 @@ const TRANSLATIONS = {
     subscription: "Subscription (Maximize)",
     cheap: "Cheap (Backup)",
     free: "Free (Fallback)",
+    webCookie: "Web Cookie",
     features: "Features",
     smartRouting: "Smart Routing",
     combos: "Combos & Fallback",
@@ -96,6 +98,7 @@ const TRANSLATIONS = {
     subscription: "Subscription (Tối đa hóa)",
     cheap: "Giá rẻ (Dự phòng)",
     free: "Miễn phí (Phương án cuối)",
+    webCookie: "Cookie Web",
     features: "Tính năng",
     smartRouting: "Định tuyến thông minh",
     combos: "Combo & Fallback",
@@ -127,6 +130,7 @@ const TRANSLATIONS = {
     subscription: "订阅 (最大化)",
     cheap: "低价 (备用)",
     free: "免费 (兜底)",
+    webCookie: "Web Cookie",
     features: "功能",
     smartRouting: "智能路由",
     combos: "组合与回退",
@@ -158,6 +162,7 @@ const TRANSLATIONS = {
     subscription: "Suscripción (Maximizar)",
     cheap: "Económico (Respaldo)",
     free: "Gratis (Alternativa)",
+    webCookie: "Cookie Web",
     features: "Funciones",
     smartRouting: "Enrutamiento inteligente",
     combos: "Combos y Fallback",
@@ -189,6 +194,7 @@ const TRANSLATIONS = {
     subscription: "サブスクリプション (最大化)",
     cheap: "格安 (バックアップ)",
     free: "無料 (フォールバック)",
+    webCookie: "Web Cookie",
     features: "機能",
     smartRouting: "スマートルーティング",
     combos: "コンボとフォールバック",

@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import PropTypes from "prop-types";
-import { Button, Badge, Input, Modal, Select } from "@/shared/components";
+import { Button, Badge, Input, Modal, Select, WebCookieHelp } from "@/shared/components";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
+import { getCookieLabel, getCookiePlaceholder, getWebCookieHelp } from "@/shared/constants/webCookieHelp";
 import { planBulkAdd } from "@/shared/utils/bulkAdd";
 
 const BULK_PLACEHOLDER = `name1|sk-key1\nname2|sk-key2\nsk-key-only-auto-named`;
@@ -12,10 +13,13 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   const NONE_PROXY_POOL_VALUE = "__none__";
   const isOllamaLocal = provider === "ollama-local";
   const isCookie = authType === "cookie";
+  const cookieHelp = isCookie ? getWebCookieHelp(provider) : null;
   const isXaiApiKey = provider === "xai" && !isCookie;
-  const credentialLabel = isCookie ? "Cookie Value" : provider === "qoder" || provider === "qoder-cn" ? "Personal Access Token (PAT)" : "API Key";
+  const credentialLabel = isCookie
+    ? (cookieHelp ? getCookieLabel(cookieHelp) : "Cookie Value")
+    : provider === "qoder" || provider === "qoder-cn" ? "Personal Access Token (PAT)" : "API Key";
   const credentialPlaceholder = isCookie
-    ? (provider === "grok-web" ? "sso=xxxxx... or just the raw value" : "eyJhbGciOi...")
+    ? (cookieHelp ? getCookiePlaceholder(cookieHelp) : (provider === "grok-web" ? "sso=xxxxx... or just the raw value" : "eyJhbGciOi..."))
     : (isXaiApiKey ? "xai-..." : provider === "qoder" || provider === "qoder-cn" ? "pt-..." : "");
 
   const isAzure = provider === "azure";
@@ -271,18 +275,26 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
             Use a direct xAI API key from console.x.ai. This is separate from Grok Build OAuth.
           </p>
         )}
-        {isCookie && authHint && (
-          <p className="text-xs text-text-muted">
-            {authHint}
-            {website && (
-              <>
-                {" "}
+        {isCookie && (
+          <div className="flex flex-col gap-2 rounded-[10px] border border-border bg-surface-2 p-3">
+            <p className="text-xs text-text-muted">
+              {authHint}
+              {authHint && website ? " " : ""}
+              {website && (
                 <a href={website} target="_blank" rel="noopener noreferrer" className="text-primary underline">
                   Open {website.replace(/^https?:\/\//, "")}
                 </a>
-              </>
-            )}
-          </p>
+              )}
+            </p>
+            <WebCookieHelp
+              providerId={provider}
+              providerName={providerName}
+              onApply={(value) => {
+                setFormData((prev) => ({ ...prev, apiKey: value }));
+                setValidationResult(null);
+              }}
+            />
+          </div>
         )}
         {providerRegions && (
           <Select
