@@ -28,48 +28,42 @@
     url: "https://integrate.api.nvidia.com/v1/models",
     auth: "bearer",
     kind: "chat",
+    // /v1/models mixes paid/partner endpoints and stale ids without saying which
+    // ones a free key can actually call. build.nvidia.com marks the free ones
+    // with the "Free Endpoint" badge (nimType=nim_type_preview); the catalog
+    // filter intersects the live ids with that set (slug/API separators are
+    // normalized). Falls back to models.dev when the page cannot be fetched.
+    freeEndpoints: {
+      url: "https://build.nvidia.com/models",
+      filter: "nimType:nim_type_preview",
+    },
   },
   // NIM's catalogue is large and moves fast. integrate.api.nvidia.com/v1/models
-  // requires a key, so the authenticated `catalog` below is fetched server-side
+  // requires a key, so the authenticated `catalog` above is fetched server-side
   // with the connection's own key (never through the public suggested-models
-  // proxy). The list below is a curated seed of the reasoning-capable
-  // text-to-text models (the ones that work through /v1/chat/completions), taken from
-  // models.dev's nvidia provider. Image-gen, video, embedding-only, rerank and
-  // safety models are omitted: they are served from other endpoints, not chat.
+  // proxy). The seed below mirrors the free endpoints that chat/completions can
+  // serve, so the list is usable before the first keyed refresh. Non-chat free
+  // endpoints (image/video/embedding/rerank/safety/tts) are omitted: they are
+  // served from other endpoints, not chat.
   // passthroughModels keeps any newer id usable without a registry edit.
   models: [
-    { id: "moonshotai/kimi-k3", name: "Kimi K3" },
+    { id: "deepseek-ai/deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
     { id: "z-ai/glm-5.3-flash", name: "GLM 5.3 Flash" },
-    { id: "thinkingmachines/inkling", name: "Inkling" },
-    { id: "deepseek-ai/deepseek-v4-pro-0813", name: "DeepSeek V4 Pro 0813" },
-    { id: "deepseek-ai/deepseek-v4-flash-0731", name: "DeepSeek V4 Flash 0731" },
+    { id: "minimaxai/minimax-m3.1-flash", name: "MiniMax M3.1 Flash" },
+    { id: "mistralai/mistral-large-4-1t-a52b", name: "Mistral Large 4" },
+    { id: "google/gemma-4-31b-it", name: "Gemma 4 31B" },
+    { id: "meta/llama-3.2-11b-vision-instruct", name: "Llama 3.2 11B Vision" },
+    { id: "meta/llama-3.2-90b-vision-instruct", name: "Llama 3.2 90B Vision" },
+    { id: "meta/muse-glimmer-30b", name: "Muse Glimmer 30B" },
+    { id: "nvidia/nemotron-3.5-bolt-e4b", name: "Nemotron 3.5 Bolt E4B" },
     { id: "nvidia/nemotron-3.5-lightning-30b-a3b", name: "Nemotron 3.5 Lightning 30B" },
-    { id: "nvidia/nemotron-3-super-120b-a12b", name: "Nemotron 3 Super 120B" },
+    { id: "nvidia/nemotron-3.5-super-vl-120b-a12b", name: "Nemotron 3.5 Super VL 120B" },
     { id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning", name: "Nemotron 3 Nano Omni 30B" },
     { id: "nvidia/nemotron-3-ultra-550b-a55b", name: "Nemotron 3 Ultra" },
-    { id: "nvidia/llama-3.3-nemotron-super-49b-v1.5", name: "Llama 3.3 Nemotron Super 49B v1.5" },
-    { id: "nvidia/llama-3.1-nemotron-ultra-253b-v1", name: "Llama 3.1 Nemotron Ultra 253B" },
-    { id: "nvidia/nemotron-nano-12b-v2-vl", name: "Nemotron Nano 12B v2 VL" },
-    { id: "nvidia/nvidia-nemotron-nano-9b-v2", name: "Nemotron Nano 9B v2" },
-    { id: "nvidia/nemotron-3-nano-30b-a3b", name: "Nemotron 3 Nano 30B" },
-    { id: "qwen/qwen3.5-397b-a17b", name: "Qwen 3.5 397B" },
-    { id: "qwen/qwen3.5-122b-a10b", name: "Qwen 3.5 122B" },
-    { id: "qwen/qwen3-coder-480b-a35b-instruct", name: "Qwen 3 Coder 480B" },
-    { id: "mistralai/mistral-medium-3.5-128b", name: "Mistral Medium 3.5 128B" },
-    { id: "mistralai/mistral-small-4-119b-2603", name: "Mistral Small 4 119B" },
-    { id: "stepfun-ai/step-3.7-flash", name: "Step 3.7 Flash" },
-    { id: "stepfun-ai/step-3.5-flash", name: "Step 3.5 Flash" },
-    { id: "poolside/laguna-xs-2.1", name: "Laguna XS 2.1" },
+    { id: "nvidia/ising-calibration-1.5-31b", name: "Ising Calibration 1.5 31B" },
     { id: "openai/gpt-oss-20b", name: "GPT-OSS 20B" },
-    { id: "meta/muse-glimmer-30b", name: "Muse Glimmer 30B" },
-    { id: "google/gemma-4-31b-it", name: "Gemma 4 31B" },
-    { id: "microsoft/phi-4-mini-instruct", name: "Phi 4 Mini" },
-    { id: "minimaxai/minimax-m3", name: "MiniMax M3" },
-    { id: "minimaxai/minimax-m2.7", name: "MiniMax M2.7" },
-    { id: "z-ai/glm-5.2", name: "GLM 5.2" },
-    { id: "deepseek-ai/deepseek-v4-pro", name: "DeepSeek V4 Pro" },
-    { id: "deepseek-ai/deepseek-v4-flash", name: "DeepSeek V4 Flash" },
-    { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" },
+    { id: "poolside/laguna-xs-2.1", name: "Laguna XS 2.1" },
+    { id: "stepfun-ai/step-5-preview", name: "Step 5 Preview" },
     { id: "nvidia/nv-embedqa-e5-v5", name: "NV EmbedQA E5 v5", kind: "embedding" },
     { id: "nvidia/parakeet-ctc-1.1b-asr", name: "Parakeet CTC 1.1B", params: ["language"], kind: "stt" },
     { id: "fastpitch", name: "FastPitch", kind: "tts" },

@@ -16,7 +16,9 @@ export const CATALOG_RAW_FILE = path.join(DATA_DIR, "model-catalog-raw.json");
 // Schema of the file this module reads. The writer stamps it; a file carrying an
 // older value predates provider-scoped modality keys, and its flat keys are not
 // looked up here, so the sync rebuilds it instead of asking upstream for a 304.
-export const CATALOG_VERSION = 2;
+// v3 adds the per-model "t" (text input) flag to the raw catalogue, so the chat
+// filter can tell a text+image model from an image-only one.
+export const CATALOG_VERSION = 3;
 
 const EMPTY = { models: {}, providers: {} };
 let cache = EMPTY;

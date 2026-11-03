@@ -13,7 +13,9 @@ import {
   CATALOG_TTL_MS,
   CATALOG_FETCH_TIMEOUT_MS,
   CATALOG_BACKGROUND_REFRESH_MIN_MS,
+  MODEL_BROKEN_RECHECK_MS,
   isLikelyNonChatModelId,
+  normalizeModelKey,
 } from "open-sse/config/catalogConfig.js";
 import { getProviderConnections } from "@/lib/db/index.js";
 import {
@@ -21,6 +23,7 @@ import {
   setProviderCatalogEntry,
 } from "@/lib/db/repos/providerCatalogRepo.js";
 import { getProviderModelAllowlist, supportsTextInput } from "./catalogModelDev.js";
+import { getFreeEndpointKeysSync, refreshFreeEndpointCache } from "./catalogFreeEndpoints.js";
 
 const REGISTRY_BY_KEY = new Map();
 for (const entry of REGISTRY) {
@@ -81,19 +84,32 @@ export function normalizeCatalogModels(data) {
 // Drop non-chat models. Ids present in the curated registry keep their explicit
 // kind (embedding/stt/tts are never catalogued); unknown ids use the shared
 // pattern heuristic, so a brand-new chat model still appears automatically.
-// When models.dev allowlist exists, only IDs in it pass through (filtering out
-// 404s and multimodal-only models that masquerade as chat).
+//
+// Providers that declare `catalog.freeEndpoints` (NVIDIA) are filtered by the
+// build.nvidia.com "Free Endpoint" set instead of the models.dev allowlist: the
+// live /v1/models list mixes paid/partner endpoints and stale ids, while the
+// free-endpoint page is exactly what a free key can call. Ids are compared with
+// separators stripped because build slugs and API ids disagree on them.
+// When the free-endpoint cache is unavailable we fall back to models.dev.
 export function filterChatModels(providerId, models) {
   const entry = getRegistryEntry(providerId);
   const staticKindById = new Map(
     (entry?.models || []).map((model) => [model.id, model.kind || "llm"]),
   );
-  const allowlist = getProviderModelAllowlist(providerId);
+  const freeKeys = entry?.catalog?.freeEndpoints
+    ? getFreeEndpointKeysSync(providerId)
+    : null;
+  const allowlist = freeKeys ? null : getProviderModelAllowlist(providerId);
   const hasAllowlist = allowlist !== null;
 
   return (Array.isArray(models) ? models : []).filter((model) => {
-    // Check allowlist first: if provider has models.dev list, only include known IDs
-    if (hasAllowlist && !allowlist.has(model.id)) return false;
+    // Free-endpoint providers: only ids in the free set (normalized match).
+    if (freeKeys) {
+      if (!freeKeys.has(normalizeModelKey(model.id))) return false;
+    } else if (hasAllowlist && !allowlist.has(model.id)) {
+      // Otherwise: if models.dev has a list, only include known IDs.
+      return false;
+    }
 
     // Non-text models: reject (multimodal-only, parsing, translation, etc.)
     if (supportsTextInput(providerId, model.id) === false) return false;
@@ -131,35 +147,26 @@ function sameProvider(connection, providerId, canonicalId) {
   return connProvider === canonicalId || connection?.provider === providerId;
 }
 
-function getBrokenFromSnapshot(cached) {
-  return (cached?.broken || []).map((item) => item?.id).filter(Boolean);
-}
+// Merge the previous retired/broken overlays with the new live snapshot:
+// - retired: ids seen upstream become available again; static seed ids absent
+//   upstream stay/get marked retired (only when we got a non-empty live list, so
+//   a truncated/failed response never mass-retires the catalogue).
+// - broken: ids that returned 404/400 are preserved across refreshes because the
+//   live /v1/models list keeps advertising them even when chat completions
+//   rejects them. Entries older than MODEL_BROKEN_RECHECK_MS expire so a
+//   transient failure gets another chance.
+function mergeRetiredAndBroken(providerId, cached, liveModels) {
+  const now = Date.now();
+  const fresh = (item) => item?.id
+    && (!item.at || now - Date.parse(item.at) < MODEL_BROKEN_RECHECK_MS);
 
-// Merge the previous retired overlay with the new live snapshot:
-// - ids seen upstream become available again (removed from retired)
-// - ids absent upstream stay/get marked retired (only when we got a non-empty
-//   live list, so a truncated/failed response never mass-retires the catalogue)
-function mergeRetiredAndBroken(providerId, previous, liveModels) {
   const retiredById = new Map();
   const brokenById = new Map();
-
-  if (Array.isArray(previous)) {
-    for (const item of previous) {
-      if (!item?.id) continue;
-      if (item.source === "upstream_410") {
-        // já está em retired
-        if (!retiredById.has(item.id)) retiredById.set(item.id, item);
-      } else if (item.reason && item.reason.startsWith("upstream_")) {
-        // broken do refresh anterior
-        if (!brokenById.has(item.id)) brokenById.set(item.id, item);
-      }
-    }
+  for (const item of cached?.retired || []) {
+    if (item?.id && !retiredById.has(item.id)) retiredById.set(item.id, item);
   }
-  // Também pega broken do cached
-  if (previous?.broken) {
-    for (const item of previous.broken) {
-      if (item?.id && !brokenById.has(item.id)) brokenById.set(item.id, item);
-    }
+  for (const item of cached?.broken || []) {
+    if (fresh(item) && !brokenById.has(item.id)) brokenById.set(item.id, item);
   }
 
   if (!Array.isArray(liveModels) || liveModels.length === 0) {
@@ -170,17 +177,12 @@ function mergeRetiredAndBroken(providerId, previous, liveModels) {
   }
 
   const liveIds = new Set(liveModels.map((model) => model.id));
-  for (const id of liveIds) {
-    retiredById.delete(id);
-    brokenById.delete(id);
-  }
+  for (const id of liveIds) retiredById.delete(id);
 
-  const now = new Date().toISOString();
+  const at = new Date().toISOString();
   for (const model of getStaticChatModels(providerId)) {
-    if (!liveIds.has(model.id)) {
-      if (!retiredById.has(model.id)) {
-        retiredById.set(model.id, { id: model.id, at: now, source: "catalog" });
-      }
+    if (!liveIds.has(model.id) && !retiredById.has(model.id) && !brokenById.has(model.id)) {
+      retiredById.set(model.id, { id: model.id, at, source: "catalog" });
     }
   }
 
@@ -189,6 +191,9 @@ function mergeRetiredAndBroken(providerId, previous, liveModels) {
     broken: [...brokenById.values()],
   };
 }
+
+// Exposto para testes da mesclagem (não use no runtime).
+export const __mergeRetiredAndBroken = mergeRetiredAndBroken;
 
 export async function getCachedCatalog(providerId) {
   const entry = getRegistryEntry(providerId);
@@ -265,8 +270,13 @@ export async function refreshProviderCatalog(providerId, { force = false, connec
       return (a.priority ?? 0) - (b.priority ?? 0);
     });
 
-  // Merge previous broken list (preserves 404/400 failures)
-  const prevBroken = cached?.broken || [];
+  // Free-endpoint providers: refresh the allowlist before filtering. Fail-open
+  // (a stale/missing cache falls back to models.dev inside filterChatModels).
+  if (config.freeEndpoints) {
+    try {
+      await refreshFreeEndpointCache(entry.id, config.freeEndpoints);
+    } catch { /* fail-open */ }
+  }
 
   let lastError = null;
   for (const connection of connections.slice(0, 3)) {
@@ -285,7 +295,7 @@ export async function refreshProviderCatalog(providerId, { force = false, connec
         connectionId: connection.id,
         models,
         retired: merged.retired,
-        broken: [...(cached?.broken || []), ...merged.broken],
+        broken: merged.broken,
       };
       await setProviderCatalogEntry(entry.id, snapshot);
       return snapshot;

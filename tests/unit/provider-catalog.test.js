@@ -3,7 +3,7 @@
 import { describe, expect, it, beforeEach, vi } from "vitest";
 
 // Mock catalogs.dev allowlist BEFORE any imports that use it
-vi.mock("../src/lib/services/catalogModelDev.js", () => ({
+vi.mock("../../src/lib/services/catalogModelDev.js", () => ({
   __esModule: true,
   getProviderModelAllowlist: () => null,
   supportsTextInput: () => true,
@@ -11,9 +11,20 @@ vi.mock("../src/lib/services/catalogModelDev.js", () => ({
   invalidateCatalogModelDevCache: () => {},
 }));
 
+// No free-endpoint cache by default: filterChatModels falls back to models.dev.
+const freeState = vi.hoisted(() => ({ keys: null }));
+vi.mock("../../src/lib/services/catalogFreeEndpoints.js", () => ({
+  __esModule: true,
+  getFreeEndpointKeysSync: () => freeState.keys,
+  refreshFreeEndpointCache: async () => freeState.keys,
+  invalidateFreeEndpointCache: () => {},
+}));
+
 import { getAdapter } from "@/lib/db/driver.js";
+import { normalizeModelKey } from "open-sse/config/catalogConfig.js";
 import { setProviderCatalogEntry } from "@/lib/db/repos/providerCatalogRepo.js";
 import {
+  __mergeRetiredAndBroken,
   canonicalProviderId,
   filterChatModels,
   getCatalogModelIds,
@@ -26,6 +37,7 @@ import {
 } from "@/lib/services/providerCatalog.js";
 
 beforeEach(async () => {
+  freeState.keys = null;
   const db = await getAdapter();
   db.run("DELETE FROM kv WHERE scope = 'providerCatalog'");
 });
@@ -100,6 +112,16 @@ describe("filterChatModels", () => {
       "nvidia/moonshotai/kimi-k2.6",
     ]);
   });
+
+  it("keeps only free endpoints when the free-endpoint cache is available", () => {
+    // Build slug uses dashes, API id uses dots: normalization bridges them.
+    freeState.keys = new Set([normalizeModelKey("z-ai/glm-5-3-flash")]);
+    const got = filterChatModels("nvidia", [
+      { id: "z-ai/glm-5.3-flash" },
+      { id: "moonshotai/kimi-k3" },
+    ]);
+    expect(got.map((m) => m.id)).toEqual(["z-ai/glm-5.3-flash"]);
+  });
 });
 
 describe("retired overlay", () => {
@@ -165,5 +187,55 @@ describe("broken overlay", () => {
 
   it("returns false for non-catalog providers", async () => {
     expect(await markModelBroken("glm", "some-model", "upstream_404")).toBe(false);
+  });
+});
+
+describe("mergeRetiredAndBroken", () => {
+  it("preserves a broken model across refreshes (still listed upstream)", () => {
+    const cached = {
+      retired: [],
+      broken: [{ id: "deepseek-ai/deepseek-v4.1-flash", at: new Date().toISOString(), reason: "upstream_404" }],
+    };
+    const merged = __mergeRetiredAndBroken("nvidia", cached, [
+      { id: "deepseek-ai/deepseek-v4.1-flash" },
+      { id: "z-ai/glm-5.3-flash" },
+    ]);
+    expect(merged.broken.map((item) => item.id)).toEqual(["deepseek-ai/deepseek-v4.1-flash"]);
+  });
+
+  it("does not duplicate broken entries", () => {
+    const at = new Date().toISOString();
+    const cached = {
+      retired: [],
+      broken: [
+        { id: "b", at, reason: "upstream_404" },
+        { id: "b", at, reason: "upstream_404" },
+      ],
+    };
+    const merged = __mergeRetiredAndBroken("nvidia", cached, [{ id: "a" }]);
+    expect(merged.broken).toHaveLength(1);
+  });
+
+  it("expires broken entries past the recheck window", () => {
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    const merged = __mergeRetiredAndBroken(
+      "nvidia",
+      { retired: [], broken: [{ id: "b", at: old, reason: "upstream_404" }] },
+      [{ id: "a" }],
+    );
+    expect(merged.broken).toEqual([]);
+  });
+
+  it("keeps previous retired ids and clears ones that came back upstream", () => {
+    const cached = {
+      retired: [
+        { id: "gone", at: "2026-01-01T00:00:00Z", source: "upstream_410" },
+        { id: "back", at: "2026-01-01T00:00:00Z", source: "upstream_410" },
+      ],
+      broken: [],
+    };
+    const merged = __mergeRetiredAndBroken("nvidia", cached, [{ id: "back" }]);
+    expect(merged.retired.map((item) => item.id)).toContain("gone");
+    expect(merged.retired.map((item) => item.id)).not.toContain("back");
   });
 });

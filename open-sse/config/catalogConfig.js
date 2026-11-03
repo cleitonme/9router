@@ -93,3 +93,20 @@ export const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 export const CATALOG_FETCH_TIMEOUT_MS = 5000;
 // Avoid a refresh storm when many /v1/models calls arrive at once.
 export const CATALOG_BACKGROUND_REFRESH_MIN_MS = 5 * 60 * 1000;
+
+// Free-endpoint detection. build.nvidia.com marks the endpoints usable with a
+// free key with the "Free Endpoint" badge (filter nimType=nim_type_preview);
+// that page is the only public source, so it is parsed and cached to disk.
+export const FREE_ENDPOINT_TTL_MS = 24 * 60 * 60 * 1000;
+export const FREE_ENDPOINT_FETCH_TIMEOUT_MS = 15000;
+export const FREE_ENDPOINT_MAX_PAGES = 5;
+// A model marked broken (404/400) is retried after this window so a transient
+// upstream failure never hides it forever.
+export const MODEL_BROKEN_RECHECK_MS = 24 * 60 * 60 * 1000;
+
+// Build slugs and API ids disagree about separators ("glm-5-3-flash" vs
+// "glm-5.3-flash", "nemotron-3_5" vs "nemotron-3.5"), so both sides are
+// compared with separators stripped.
+export function normalizeModelKey(id) {
+  return String(id || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}

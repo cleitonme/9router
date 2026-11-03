@@ -65,8 +65,13 @@ function slim(catalog) {
   for (const [providerId, provider] of Object.entries(catalog)) {
     const models = {};
     for (const [modelId, model] of Object.entries(provider?.models || {})) {
+      const input = model?.modalities?.input || [];
       models[modelId] = {
-        i: (model?.modalities?.input || []).filter((x) => x !== "text"),
+        i: input.filter((x) => x !== "text"),
+        // "i" only carries the non-text modalities, so a text+image model looks
+        // like an image-only one. Keep an explicit flag for text input or the
+        // chat filter would drop every multimodal chat model.
+        t: input.includes("text"),
         c: model?.limit?.context,
         o: model?.limit?.output,
         r: model?.reasoning || undefined,

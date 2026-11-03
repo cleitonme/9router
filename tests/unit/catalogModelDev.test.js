@@ -1,109 +1,31 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { describe, expect, it } from "vitest";
 
-vi.mock("../../src/lib/services/catalogModelDev.js", () => ({
-  __esModule: true,
-  getProviderModelAllowlist: vi.fn(),
-  supportsTextInput: vi.fn(),
-  isModelInAllowlist: vi.fn(),
-  invalidateCatalogModelDevCache: vi.fn(),
-  __mockCatalogFunctions: vi.fn(),
-}));
+import { __textInputForModel } from "../../src/lib/services/catalogModelDev.js";
 
-describe("catalogModelDev - getProviderModelAllowlist", () => {
-  let getProviderModelAllowlist;
-  let supportsTextInput;
-
-  beforeEach(async () => {
-    const module = await import("../../src/lib/services/catalogModelDev.js");
-    getProviderModelAllowlist = module.getProviderModelAllowlist;
-    supportsTextInput = module.supportsTextInput;
+// The raw catalogue stores non-text modalities in "i" and, since v3, an
+// explicit "t" flag for text input. A text+image model has i=["image"] but must
+// still count as text-capable, otherwise the chat filter drops every multimodal
+// chat model (e.g. deepseek-ai/deepseek-v4.1-flash).
+describe("catalogModelDev - text input detection", () => {
+  it("accepts a text+image model (v3 flag)", () => {
+    expect(__textInputForModel({ i: ["image"], t: true })).toBe(true);
   });
 
-  afterEach(() => {
-    vi.clearAllMocks();
+  it("rejects an image-only model (v3 flag)", () => {
+    expect(__textInputForModel({ i: ["image"], t: false })).toBe(false);
   });
 
-  it("returns Set of model IDs for provider with non-text models", () => {
-    getProviderModelAllowlist.mockImplementation((providerId) => {
-      if (providerId === "nvidiaMultimodal") {
-        return new Set(["gptimage/gptimage-v1"]);
-      }
-      return null;
-    });
-    
-    const allowlist = getProviderModelAllowlist("nvidiaMultimodal");
-    expect(allowlist).toBeInstanceOf(Set);
-    expect([...allowlist]).toEqual(["gptimage/gptimage-v1"]);
+  it("accepts a text-only model (empty i)", () => {
+    expect(__textInputForModel({ i: [], t: true })).toBe(true);
   });
 
-  it("returns null for provider not in catalog", () => {
-    expect(getProviderModelAllowlist("nonexistent")).toBeNull();
+  it("falls back to the legacy heuristic when t is absent", () => {
+    // Legacy text+image was indistinguishable from image-only.
+    expect(__textInputForModel({ i: ["image"] })).toBe(false);
+    expect(__textInputForModel({ i: [] })).toBe(true);
   });
 
-  it("supports text input for text-only models", () => {
-    supportsTextInput.mockImplementation((providerId, modelId) => {
-      if (providerId === "nvidia" && modelId === "deepseek-ai/deepseek-v4-flash") {
-        return true;
-      }
-      return null;
-    });
-    
-    expect(supportsTextInput("nvidia", "deepseek-ai/deepseek-v4-flash")).toBe(true);
-  });
-
-  it("rejects text input for multimodal models", () => {
-    supportsTextInput.mockImplementation((providerId, modelId) => {
-      if (providerId === "nvidiaMultimodal" && modelId === "gptimage/gptimage-v1") {
-        return false;
-      }
-      return null;
-    });
-    
-    expect(supportsTextInput("nvidiaMultimodal", "gptimage/gptimage-v1")).toBe(false);
-  });
-
-  it("returns false for unknown model in provider", () => {
-    supportsTextInput.mockImplementation((providerId, modelId) => {
-      if (providerId === "nvidia" && modelId === "unknown-model") {
-        return false;
-      }
-      return null;
-    });
-    
-    expect(supportsTextInput("nvidia", "unknown-model")).toBe(false);
-  });
-});
-
-describe("catalogModelDev - allowlist with empty providers", () => {
-  let getProviderModelAllowlist;
-
-  beforeEach(async () => {
-    const module = await import("../../src/lib/services/catalogModelDev.js");
-    getProviderModelAllowlist = module.getProviderModelAllowlist;
-  });
-
-  it("returns null for provider with only text-only models (empty allowlist)", () => {
-    getProviderModelAllowlist.mockImplementation((providerId) => {
-      if (providerId === "nvidia") {
-        // Provider exists but has no non-text models
-        return null;  // This is the fix: empty allowlist should return null, not an empty Set
-      }
-      return null;
-    });
-    
-    const allowlist = getProviderModelAllowlist("nvidia");
-    expect(allowlist).toBeNull();
-  });
-
-  it("returns null for provider with empty object in catalog (no models)", () => {
-    getProviderModelAllowlist.mockImplementation((providerId) => {
-      if (providerId === "emptyProvider") {
-        return null;
-      }
-      return null;
-    });
-    
-    const allowlist = getProviderModelAllowlist("emptyProvider");
-    expect(allowlist).toBeNull();
+  it("returns null for an unknown model", () => {
+    expect(__textInputForModel(undefined)).toBeNull();
   });
 });

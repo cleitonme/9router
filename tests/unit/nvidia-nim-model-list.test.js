@@ -3,23 +3,44 @@ import { describe, expect, it } from "vitest";
 import nvidia from "../../open-sse/providers/registry/nvidia.js";
 import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
 
-// NVIDIA NIM catalogue refresh. integrate.api.nvidia.com/v1/models needs a key,
-// so there is no modelsFetcher and the seeded list below is the discovery path.
-// ids and context windows come from models.dev's nvidia provider.
+// NVIDIA NIM catalogue. integrate.api.nvidia.com/v1/models needs a key, so there
+// is no modelsFetcher; the seeded list is the offline fallback. Only the models
+// that build.nvidia.com marks as "Free Endpoint" are seeded (plus the separate
+// embedding/stt/tts service models), so the list is free-tier accurate even
+// before the first keyed refresh.
 
 describe("nvidia registry model list", () => {
-    it("keeps every previously-seeded chat model", () => {
+    it("seeds the current free chat endpoints", () => {
         const ids = nvidia.models.map((m) => m.id);
         for (const id of [
-            "minimaxai/minimax-m2.7",
-            "minimaxai/minimax-m3",
-            "z-ai/glm-5.2",
-            "deepseek-ai/deepseek-v4-pro",
-            "deepseek-ai/deepseek-v4-flash",
-            "moonshotai/kimi-k2.6",
+            "deepseek-ai/deepseek-v4.1-flash",
+            "z-ai/glm-5.3-flash",
+            "minimaxai/minimax-m3.1-flash",
+            "mistralai/mistral-large-4-1t-a52b",
+            "google/gemma-4-31b-it",
+            "meta/muse-glimmer-30b",
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
             "nvidia/nemotron-3-ultra-550b-a55b",
+            "openai/gpt-oss-20b",
+            "poolside/laguna-xs-2.1",
+            "stepfun-ai/step-5-preview",
         ]) {
             expect(ids, id).toContain(id);
+        }
+    });
+
+    it("does not seed paid/partner endpoints", () => {
+        const ids = nvidia.models.map((m) => m.id);
+        for (const id of [
+            "moonshotai/kimi-k3",
+            "z-ai/glm-5.3",
+            "z-ai/glm-5.2",
+            "qwen/qwen3.5-397b-a17b",
+            "thinkingmachines/inkling",
+            "deepseek-ai/deepseek-v4-pro",
+            "deepseek-ai/deepseek-v4-flash",
+        ]) {
+            expect(ids, id).not.toContain(id);
         }
     });
 
@@ -29,21 +50,6 @@ describe("nvidia registry model list", () => {
         expect(byId["nvidia/parakeet-ctc-1.1b-asr"].kind).toBe("stt");
         expect(byId["fastpitch"].kind).toBe("tts");
         expect(byId["tacotron2"].kind).toBe("tts");
-    });
-
-    it("adds the current reasoning models from the catalogue", () => {
-        const ids = nvidia.models.map((m) => m.id);
-        for (const id of [
-            "moonshotai/kimi-k3",
-            "z-ai/glm-5.3-flash",
-            "nvidia/nemotron-3.5-lightning-30b-a3b",
-            "nvidia/nemotron-3-super-120b-a12b",
-            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
-            "qwen/qwen3.5-397b-a17b",
-            "thinkingmachines/inkling",
-        ]) {
-            expect(ids, id).toContain(id);
-        }
     });
 
     it("has no duplicate ids", () => {
@@ -66,12 +72,16 @@ describe("nvidia registry model list", () => {
         expect(nvidia.modelsFetcher).toBeUndefined();
     });
 
-    it("declares an authenticated live catalog instead", () => {
+    it("declares an authenticated live catalog plus the free-endpoint source", () => {
         // Fetched server-side with the connection key; never through the public
         // suggested-models proxy.
         expect(nvidia.catalog?.url).toBe("https://integrate.api.nvidia.com/v1/models");
         expect(nvidia.catalog?.auth).toBe("bearer");
         expect(nvidia.catalog?.kind).toBe("chat");
+        expect(nvidia.catalog?.freeEndpoints).toMatchObject({
+            url: "https://build.nvidia.com/models",
+            filter: "nimType:nim_type_preview",
+        });
     });
 
     it("drops the retired GLM 5.3 seed (EOL on 2026-10-28)", () => {
@@ -100,17 +110,10 @@ describe("nvidia registry model list", () => {
 describe("newly-seeded nvidia models resolve real capabilities", () => {
     // The router keys off these: a wrong `vision` silently strips images and a
     // wrong `reasoning` drops thinking.
-    //
-    // contextWindow is deliberately NOT asserted against the catalogue here.
-    // capabilities.js resolves family-wide first — `*qwen3.5*` is 1M and
-    // `*nemotron*` is 128K for every provider, and those rules predate this
-    // change. Pinning per-model catalogue values here would encode a mismatch
-    // that already exists repo-wide rather than anything this list introduces.
     it.each([
+        ["deepseek-ai/deepseek-v4.1-flash", { reasoning: true, vision: true }],
         ["nvidia/nemotron-3.5-lightning-30b-a3b", { reasoning: true }],
         ["z-ai/glm-5.3-flash", { reasoning: true, vision: true }],
-        ["moonshotai/kimi-k3", { reasoning: true, vision: true }],
-        ["qwen/qwen3.5-397b-a17b", { reasoning: true, vision: true }],
         ["nvidia/nemotron-3-ultra-550b-a55b", { reasoning: true }],
         ["openai/gpt-oss-20b", { reasoning: true }],
     ])("%s", (id, want) => {
