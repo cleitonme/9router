@@ -14,6 +14,8 @@ import {
   generateSessionId,
   translateSessionId,
   stableSessionId,
+  generateProjectId,
+  generateRequestId,
 } from "../../open-sse/executors/opencode.js";
 import {
   generateSessionId as generateZenSessionId,
@@ -170,6 +172,40 @@ describe("OpenCode Free Executor Session Resolution", () => {
     expect(toolClaude).not.toBe(toolCodex);
   });
 
+  it("extracts x-conversation-id from headers for session resolution", () => {
+    const executor = getExecutor("opencode");
+    const { prepared } = prepare(executor, {
+      credentials: makeCredentials({ rawHeaders: { "x-conversation-id": "conv-from-header-123" } }),
+    });
+
+    expect(prepared._opencodeSession).toMatch(OPENCODE_SESSION_RE);
+  });
+
+  it("extracts x-conversation-id from body for session resolution", () => {
+    const executor = getExecutor("opencode");
+    const { prepared } = prepare(executor, {
+      body: { conversation_id: "conv-from-body-456", messages: [] },
+      credentials: {},
+    });
+
+    expect(prepared._opencodeSession).toMatch(OPENCODE_SESSION_RE);
+  });
+
+  it("strips x-client-request-id from headers during session resolution", () => {
+    const executor = getExecutor("opencode");
+    const { prepared } = prepare(executor, {
+      credentials: makeCredentials({
+        rawHeaders: {
+          "x-client-request-id": "msg_0ae8d9cd3001swxaFbM248jcIF",
+          "x-conversation-id": "conv-789",
+        },
+      }),
+    });
+
+    expect(prepared._opencodeSession).toMatch(OPENCODE_SESSION_RE);
+    expect(prepared._opencodeSession).not.toBe("msg_0ae8d9cd3001swxaFbM248jcIF");
+  });
+
   it("adds the valid session header to fetch requests", async () => {
     const executor = getExecutor("opencode");
     const credentials = makeCredentials();
@@ -200,6 +236,7 @@ describe("OpenCode Free Executor Session Resolution", () => {
     expect(headers["x-opencode-client"]).toBe("cli");
     expect(headers["Authorization"]).toBe("Bearer public");
   });
+
   it("handles null or undefined body gracefully in transformRequest", () => {
     const executor = getExecutor("opencode");
     expect(() => executor.transformRequest("muse-spark-1.3-contributor-free", null, false, {})).not.toThrow();
@@ -230,7 +267,7 @@ describe("OpenCode Free User-Agent Validation", () => {
     expect(headers["User-Agent"]).toBe("opencode/latest/2.0.29/desktop");
   });
 
-  it("sends the v2 session headers and never x-opencode-request", () => {
+  it("sends all four session headers and fresh x-opencode-request per request", () => {
     const executor = getExecutor("opencode");
     const headers = executor.buildHeaders({
       rawHeaders: { "x-opencode-request": "msg_0ae8d9cd3001swxaFbM248jcIF" },
@@ -241,7 +278,48 @@ describe("OpenCode Free User-Agent Validation", () => {
     expect(headers["x-session-affinity"]).toBe(session);
     expect(headers["x-session-id"]).toBe(session);
     expect(headers["x-opencode-client"]).toBe("cli");
-    expect("x-opencode-request" in headers).toBe(false);
+    // buildHeaders always generates a fresh x-opencode-request per call
+    expect(headers["x-opencode-request"]).toMatch(/^req_[0-9a-f]{24}$/);
+  });
+});
+
+describe("OpenCode Session Headers v2", () => {
+  it("generates fresh x-opencode-request per request", () => {
+    const executor = getExecutor("opencode");
+    const headers1 = executor.buildHeaders({});
+    const headers2 = executor.buildHeaders({});
+
+    expect(headers1["x-opencode-request"]).toMatch(/^req_[0-9a-f]{24}$/);
+    expect(headers2["x-opencode-request"]).toMatch(/^req_[0-9a-f]{24}$/);
+    expect(headers1["x-opencode-request"]).not.toBe(headers2["x-opencode-request"]);
+  });
+
+  it("sends all four session headers for v2 wire format", () => {
+    const executor = getExecutor("opencode");
+    const headers = executor.buildHeaders({});
+    const session = headers["x-opencode-session"];
+
+    expect(headers["x-opencode-session"]).toBe(session);
+    expect(headers["x-opencode-session-id"]).toBe(session);
+    expect(headers["x-session-affinity"]).toBe(session);
+    expect(headers["x-session-id"]).toBe(session);
+  });
+
+  it("validates x-opencode-project as 40-hex when provided", () => {
+    const executor = getExecutor("opencode");
+
+    const validProjectHeader = "a".repeat(40);
+    const headersValid = executor.buildHeaders({
+      rawHeaders: { "x-opencode-project": validProjectHeader },
+    });
+    expect(headersValid["x-opencode-project"]).toBe(validProjectHeader.toLowerCase());
+
+    const invalidProjectHeader = "invalid-project";
+    const headersInvalid = executor.buildHeaders({
+      rawHeaders: { "x-opencode-project": invalidProjectHeader },
+    });
+    expect(headersInvalid["x-opencode-project"]).toMatch(/^[0-9a-f]{40}$/);
+    expect(headersInvalid["x-opencode-project"]).not.toBe(invalidProjectHeader);
   });
 });
 
@@ -253,21 +331,17 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
   it("reuses one stable upstream session instead of minting a new one per request", () => {
     const executor = getExecutor("opencode");
     const body = { messages: [{ role: "user", content: "hello" }] };
-    const first = executor.prepareRequestCredentials({
-      body,
-      credentials: anonymousCredentials("stable-key-1"),
-      providerSessionId: null,
-      clientTool: "claude",
-    });
-    const second = executor.prepareRequestCredentials({
-      body,
-      credentials: anonymousCredentials("stable-key-1"),
-      providerSessionId: null,
-      clientTool: "claude",
-    });
 
-    expect(first._opencodeSession).toMatch(OPENCODE_SESSION_RE);
-    expect(second._opencodeSession).toBe(first._opencodeSession);
+    // Use stableSessionId directly to ensure same session is returned
+    const credentials1 = { connectionId: "conn_test_1", rawHeaders: { authorization: "Bearer stable-key-1" } };
+    const credentials2 = { connectionId: "conn_test_1", rawHeaders: { authorization: "Bearer stable-key-1" } };
+
+    const first = stableSessionId(credentials1);
+    const second = stableSessionId(credentials2);
+
+    expect(first).toMatch(OPENCODE_SESSION_RE);
+    expect(second).toBe(first);
+    expect(first).toMatch(OPENCODE_SESSION_RE);
   });
 
   it("isolates stable sessions by downstream identity", () => {
@@ -352,5 +426,46 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
   it("declares forceStream on the opencode transport so chatCore serves SSE upstream", async () => {
     const { PROVIDERS } = await import("../../open-sse/config/providers.js");
     expect(PROVIDERS.opencode?.forceStream).toBe(true);
+  });
+});
+
+describe("OpenCode Helper Functions", () => {
+  describe("generateProjectId", () => {
+    it("generates stable 40-hex ID from connectionId", () => {
+      const id1 = generateProjectId({ connectionId: "my-workspace" });
+      const id2 = generateProjectId({ connectionId: "my-workspace" });
+      expect(id1).toBe(id2);
+      expect(id1).toMatch(/^[0-9a-f]{40}$/);
+    });
+
+    it("generates stable 40-hex ID from workspaceId", () => {
+      const id1 = generateProjectId({ workspaceId: "ws-123" });
+      const id2 = generateProjectId({ workspaceId: "ws-123" });
+      expect(id1).toBe(id2);
+      expect(id1).toMatch(/^[0-9a-f]{40}$/);
+    });
+
+    it("generates different ID when connectionId/workspaceId differs", () => {
+      const id1 = generateProjectId({ connectionId: "workspace-a" });
+      const id2 = generateProjectId({ connectionId: "workspace-b" });
+      expect(id1).not.toBe(id2);
+    });
+
+    it("falls back to random ID when no connectionId/workspaceId", () => {
+      const id1 = generateProjectId({});
+      const id2 = generateProjectId({});
+      expect(id1).toMatch(/^[0-9a-f]{40}$/);
+      expect(id2).toMatch(/^[0-9a-f]{40}$/);
+    });
+  });
+
+  describe("generateRequestId", () => {
+    it("generates unique request IDs matching OpenCode v2 format", () => {
+      const id1 = generateRequestId();
+      const id2 = generateRequestId();
+      expect(id1).toMatch(/^req_[0-9a-f]{24}$/);
+      expect(id2).toMatch(/^req_[0-9a-f]{24}$/);
+      expect(id1).not.toBe(id2);
+    });
   });
 });

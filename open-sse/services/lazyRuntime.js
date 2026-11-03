@@ -15,10 +15,10 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { getWritableDataDir } from "../utils/writableDataDir.js";
 
-// Keep in sync with package.json devDependencies.
+// Keep in sync with package.json devDependencies (exact pinned versions for supply-chain safety).
 const LAZY_DEP_VERSIONS = {
-  "playwright-core": "^1.62.1",
-  "wreq-js": "^3.2.0",
+  "playwright-core": "1.62.1",
+  "wreq-js": "3.2.0",
 };
 
 function getRuntimeDir() {

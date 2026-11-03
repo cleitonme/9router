@@ -20,6 +20,28 @@ import {
 // the v1 "opencode/1.18.x" form with 403 FreeTierError since 2026-10-14.
 const OPENCODE_UA = "opencode/latest/2.0.26/cli";
 const OPENCODE_CLIENT = "cli";
+
+// legacy shapes and requires wire parity with the current released v2 CLI.
+const OPENCODE_LEGACY_UA = "opencode/dev/0.0.0-dev-202610272228/opencode";
+const OPENCODE_LEGACY_CLIENT = "opencode";
+
+const BOOT_PROJECT_ID = crypto.randomBytes(20).toString("hex");
+
+// 40-hex project id generator: mirrors the real CLI which derives it
+// from the local workspace path, ensuring router instances and connections
+// maintain a stable project identity without colliding into a single "global" bucket.
+export function generateProjectId(credentials) {
+  const ws = credentials?.workspaceId || credentials?.connectionId;
+  if (ws) {
+    return crypto.createHash("sha1").update(`project:${ws}`).digest("hex");
+  }
+  return BOOT_PROJECT_ID;
+}
+
+export function generateRequestId() {
+  return "req_" + crypto.randomBytes(12).toString("hex");
+}
+
 const MAX_SESSION_LENGTH = 256;
 const MAX_TOOL_NAME_LEN = 128;
 const SESSION_HEADER = "x-opencode-session";
@@ -142,6 +164,23 @@ function nativeSession(headers) {
   return null;
 }
 
+const RECOGNIZED_SESSION_HEADERS = [
+  "x-session-id",
+  "session-id",
+  "session_id",
+  "x-amp-thread-id",
+  "x-claude-code-session-id",
+  "x-conversation-id",
+];
+
+function headersHaveSessionHints(headers) {
+  if (!headers || typeof headers !== "object") return false;
+  for (const k of Object.keys(headers)) {
+    if (RECOGNIZED_SESSION_HEADERS.includes(k.toLowerCase()) && headers[k]) return true;
+  }
+  return false;
+}
+
 function identityKey(credentials) {
   const connectionId = credentials?.connectionId || credentials?.id;
   if (connectionId) return `opencode:conn:${String(connectionId).slice(0, 128)}`;
@@ -182,8 +221,8 @@ function bodyHasSessionHints(body) {
     const arr = Array.isArray(body.messages)
       ? body.messages
       : Array.isArray(body.input)
-        ? body.input
-        : null;
+      ? body.input
+      : null;
     if (arr) {
       let assistantText = "";
       for (const msg of arr) {
@@ -233,20 +272,38 @@ function resolveOpencodeSession(body, credentials, providerSessionId, clientTool
   const hinted = incoming || normalizeSession(providerSessionId);
   if (hinted) return translateSessionId(hinted, clientTool);
 
-  if (credentials?.connectionId || bodyHasSessionHints(body)) {
-    let viaManager = null;
-    try {
-      viaManager = resolveSessionId({
-        headers,
-        body,
-        connectionId: credentials?.connectionId,
-        scope: "opencode",
-      });
-    } catch {
-      viaManager = null;
+  // Extract x-conversation-id from headers if present
+  if (credentials?.connectionId || bodyHasSessionHints(body) || headersHaveSessionHints(headers)) {
+    let explicitClient = body?.prompt_cache_key || body?.session_id || body?.conversation_id;
+    if (!explicitClient) {
+      for (const [k, v] of Object.entries(headers)) {
+        if (k.toLowerCase() === "x-conversation-id" && v) {
+          explicitClient = v;
+          break;
+        }
+      }
     }
-    if (viaManager) return translateSessionId(viaManager, clientTool);
+    if (explicitClient) {
+      return translateSessionId(String(explicitClient), clientTool);
+    }
   }
+
+  let viaManager = null;
+  try {
+    const sanitizedHeaders = {};
+    for (const [k, v] of Object.entries(headers)) {
+      if (k.toLowerCase() !== "x-client-request-id") sanitizedHeaders[k] = v;
+    }
+    viaManager = resolveSessionId({
+      headers: sanitizedHeaders,
+      body,
+      connectionId: credentials?.connectionId,
+      scope: "opencode",
+    });
+  } catch {
+    viaManager = null;
+  }
+  if (viaManager) return translateSessionId(viaManager, clientTool);
 
   return stableSessionId(credentials);
 }
@@ -368,7 +425,6 @@ export class OpenCodeExecutor extends BaseExecutor {
     // always stream upstream and let the handler layer aggregate for non-stream clients.
     if (body && typeof body === "object") body.stream = true;
     if (isResponsesModel(model || body?.model) && body && typeof body === "object") {
-      // ponytail: chỉ model đã xác nhận auto-only; mở allowlist khi có bằng chứng.
       if ("tool_choice" in body && body.tool_choice !== "auto"
         && this.config.quirks?.forceAutoToolChoiceModels?.includes(baseModelId(model))) {
         body.tool_choice = "auto";
@@ -399,6 +455,9 @@ export class OpenCodeExecutor extends BaseExecutor {
       dropAdaptiveReasoningEffort(body);
       applyFingerprintTools(body, false, { claude: isMessagesModel(model || body?.model) });
     }
+    if (body && typeof body === "object" && credentials?.[SESSION_FIELD]) {
+      body.prompt_cache_key = credentials[SESSION_FIELD];
+    }
     return injectReasoningContent({ provider: this.provider, model, body });
   }
 
@@ -409,14 +468,35 @@ export class OpenCodeExecutor extends BaseExecutor {
   // request fails with an actionable OpencodeTlsUnavailableError.
   async execute(args) {
     const credentials = this.prepareRequestCredentials(args);
+    let providerOverrides = args?.providerOverrides;
+    if (providerOverrides?.headers) {
+      const sanitized = {};
+      for (const [k, v] of Object.entries(providerOverrides.headers)) {
+        if (k.toLowerCase() !== "x-opencode-request") {
+          sanitized[k] = v;
+        }
+      }
+      providerOverrides = { ...providerOverrides, headers: sanitized };
+    }
     return super.execute({
       ...args,
+      providerOverrides,
       credentials,
-      directFetch: (url, options) => opencodeTlsFetch(url, {
-        method: options.method,
-        headers: options.headers,
-        body: options.body,
-      }, { signal: options.signal }),
+      directFetch: (url, options, extra = {}) => {
+        const headers = {
+          ...(options?.headers || {}),
+          "x-opencode-request": generateRequestId(),
+        };
+        return opencodeTlsFetch(url, {
+          method: options.method,
+          headers,
+          body: options.body,
+        }, {
+          signal: options.signal,
+          proxyUrl: extra.proxyUrl || options.proxyUrl,
+        });
+      },
+      directFetchProxy: true,
     });
   }
 
@@ -437,20 +517,27 @@ export class OpenCodeExecutor extends BaseExecutor {
     const downstreamUa = lower["user-agent"] || "";
     const isOpencodeDownstream = hasValidOpencodeVersion(downstreamUa);
 
-    const session = credentials?.[SESSION_FIELD] || this.prepareRequestCredentials({ credentials })[SESSION_FIELD];
+    const session = credentials?.[SESSION_FIELD] || stableSessionId(credentials || {});
 
     // Mirrors the v2 CLI. Upstream needs x-opencode-session-id next to
     // x-opencode-session, and rejects any x-opencode-request (v1 only) with 403.
+    const projectHeader = lower["x-opencode-project"];
+    const validProject = typeof projectHeader === "string" && /^[0-9a-f]{40}$/i.test(projectHeader);
+
+    // Mirrors the real v2 CLI wire shape: session id is sent on all four headers
+    // (session, session-id, session-affinity, X-Session-Id), x-opencode-request
+    // is freshly generated per request, and project id has stable 40-hex workspace identity.
     const headers = {
       "Content-Type": "application/json",
       "Authorization": "Bearer public",
       "User-Agent": isOpencodeDownstream ? downstreamUa : OPENCODE_UA,
       "x-opencode-client": lower["x-opencode-client"] || OPENCODE_CLIENT,
+      "x-opencode-project": validProject ? projectHeader.toLowerCase() : generateProjectId(credentials),
+      "x-opencode-request": generateRequestId(),
       "x-opencode-session": session,
       "x-opencode-session-id": session,
       "x-session-affinity": session,
       "x-session-id": session,
-      "x-opencode-project": lower["x-opencode-project"] || "global",
       "Accept": stream ? "text/event-stream" : "*/*",
     };
     if (url.endsWith("/messages")) headers["anthropic-version"] = ANTHROPIC_API_VERSION;
