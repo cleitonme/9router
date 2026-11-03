@@ -7,6 +7,29 @@
 // through /v1/chat/completions. Kept config-driven so a new family is a
 // one-line change instead of a condition inside the service.
 export const NON_CHAT_MODEL_PATTERNS = [
+  // Non-chat families from models.dev observation
+  "parse",
+  "translate",
+  "synthetic-video",
+  "video-detector",
+  "usdcode",
+  "bevformer",
+  "active-speaker",
+  "voice",
+  "studiovoice",
+  "riva-translate",
+  "riva-",
+  "neva",
+  "nvclip",
+  "clip",
+  "image",
+  "imagen",
+  "diffusion",
+  "flux",
+  "sdxl",
+  "stable-diffusion",
+  // Multimodal detection via models.dev modalities
+  "embed",
   "embed",
   "rerank",
   "reranker",

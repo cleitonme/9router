@@ -1,6 +1,16 @@
 // Provider catalogue service: live snapshot cache + retired overlay.
 // Uses the real sqlite kv layer with the providerCatalog scope cleaned per test.
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
+
+// Mock catalogs.dev allowlist BEFORE any imports that use it
+vi.mock("../src/lib/services/catalogModelDev.js", () => ({
+  __esModule: true,
+  getProviderModelAllowlist: () => null,
+  supportsTextInput: () => true,
+  isModelInAllowlist: () => null,
+  invalidateCatalogModelDevCache: () => {},
+}));
+
 import { getAdapter } from "@/lib/db/driver.js";
 import { setProviderCatalogEntry } from "@/lib/db/repos/providerCatalogRepo.js";
 import {
@@ -9,7 +19,9 @@ import {
   getCatalogModelIds,
   isCatalogProvider,
   isModelRetired,
+  isModelBroken,
   markModelRetired,
+  markModelBroken,
   normalizeCatalogModels,
 } from "@/lib/services/providerCatalog.js";
 
@@ -84,6 +96,7 @@ describe("retired overlay", () => {
       fetchedAt: new Date().toISOString(),
       models: [{ id: "a" }, { id: "b" }],
       retired: [{ id: "b", at: "2026-01-01T00:00:00Z", source: "upstream_410" }],
+      broken: [],
     });
 
     const ids = await getCatalogModelIds("nvidia");
@@ -113,5 +126,31 @@ describe("retired overlay", () => {
     const cached = await getProviderCatalogEntry("nvidia");
     expect(cached.retired).toHaveLength(1);
     expect(cached.retired[0]).toMatchObject({ id: "z-ai/glm-5.3", source: "upstream_410" });
+  });
+});
+
+describe("broken overlay", () => {
+  it("marks a model as broken and getCatalogModelIds excludes it", async () => {
+    await setProviderCatalogEntry("nvidia", {
+      provider: "nvidia",
+      fetchedAt: new Date().toISOString(),
+      models: [{ id: "a" }, { id: "b" }],
+      retired: [],
+      broken: [],
+    });
+
+    await markModelBroken("nvidia", "b", "upstream_404");
+
+    const ids = await getCatalogModelIds("nvidia");
+    expect([...ids]).toEqual(["a"]);
+
+    const { getProviderCatalogEntry } = await import("@/lib/db/repos/providerCatalogRepo.js");
+    const cached = await getProviderCatalogEntry("nvidia");
+    expect(isModelBroken(cached, "b")).toBe(true);
+    expect(isModelBroken(cached, "a")).toBe(false);
+  });
+
+  it("returns false for non-catalog providers", async () => {
+    expect(await markModelBroken("glm", "some-model", "upstream_404")).toBe(false);
   });
 });

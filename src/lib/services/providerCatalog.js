@@ -20,6 +20,7 @@ import {
   getProviderCatalogEntry,
   setProviderCatalogEntry,
 } from "@/lib/db/repos/providerCatalogRepo.js";
+import { getProviderModelAllowlist, supportsTextInput } from "./catalogModelDev.js";
 
 const REGISTRY_BY_KEY = new Map();
 for (const entry of REGISTRY) {
@@ -80,12 +81,23 @@ export function normalizeCatalogModels(data) {
 // Drop non-chat models. Ids present in the curated registry keep their explicit
 // kind (embedding/stt/tts are never catalogued); unknown ids use the shared
 // pattern heuristic, so a brand-new chat model still appears automatically.
+// When models.dev allowlist exists, only IDs in it pass through (filtering out
+// 404s and multimodal-only models that masquerade as chat).
 export function filterChatModels(providerId, models) {
   const entry = getRegistryEntry(providerId);
   const staticKindById = new Map(
     (entry?.models || []).map((model) => [model.id, model.kind || "llm"]),
   );
+  const allowlist = getProviderModelAllowlist(providerId);
+  const hasAllowlist = allowlist !== null;
+
   return (Array.isArray(models) ? models : []).filter((model) => {
+    // Check allowlist first: if provider has models.dev list, only include known IDs
+    if (hasAllowlist && !allowlist.has(model.id)) return false;
+
+    // Non-text models: reject (multimodal-only, parsing, translation, etc.)
+    if (supportsTextInput(providerId, model.id) === false) return false;
+
     const staticKind = staticKindById.get(model.id);
     if (staticKind && staticKind !== "llm") return false;
     if (!staticKind && isLikelyNonChatModelId(model.id)) return false;
@@ -119,28 +131,63 @@ function sameProvider(connection, providerId, canonicalId) {
   return connProvider === canonicalId || connection?.provider === providerId;
 }
 
+function getBrokenFromSnapshot(cached) {
+  return (cached?.broken || []).map((item) => item?.id).filter(Boolean);
+}
+
 // Merge the previous retired overlay with the new live snapshot:
 // - ids seen upstream become available again (removed from retired)
 // - ids absent upstream stay/get marked retired (only when we got a non-empty
 //   live list, so a truncated/failed response never mass-retires the catalogue)
-function mergeRetired(providerId, previous, liveModels) {
-  const retiredById = new Map(
-    (Array.isArray(previous) ? previous : [])
-      .filter((item) => item && item.id)
-      .map((item) => [item.id, item]),
-  );
-  if (!Array.isArray(liveModels) || liveModels.length === 0) {
-    return [...retiredById.values()];
-  }
-  const liveIds = new Set(liveModels.map((model) => model.id));
-  for (const id of liveIds) retiredById.delete(id);
-  const now = new Date().toISOString();
-  for (const model of getStaticChatModels(providerId)) {
-    if (!liveIds.has(model.id) && !retiredById.has(model.id)) {
-      retiredById.set(model.id, { id: model.id, at: now, source: "catalog" });
+function mergeRetiredAndBroken(providerId, previous, liveModels) {
+  const retiredById = new Map();
+  const brokenById = new Map();
+
+  if (Array.isArray(previous)) {
+    for (const item of previous) {
+      if (!item?.id) continue;
+      if (item.source === "upstream_410") {
+        // já está em retired
+        if (!retiredById.has(item.id)) retiredById.set(item.id, item);
+      } else if (item.reason && item.reason.startsWith("upstream_")) {
+        // broken do refresh anterior
+        if (!brokenById.has(item.id)) brokenById.set(item.id, item);
+      }
     }
   }
-  return [...retiredById.values()];
+  // Também pega broken do cached
+  if (previous?.broken) {
+    for (const item of previous.broken) {
+      if (item?.id && !brokenById.has(item.id)) brokenById.set(item.id, item);
+    }
+  }
+
+  if (!Array.isArray(liveModels) || liveModels.length === 0) {
+    return {
+      retired: [...retiredById.values()],
+      broken: [...brokenById.values()],
+    };
+  }
+
+  const liveIds = new Set(liveModels.map((model) => model.id));
+  for (const id of liveIds) {
+    retiredById.delete(id);
+    brokenById.delete(id);
+  }
+
+  const now = new Date().toISOString();
+  for (const model of getStaticChatModels(providerId)) {
+    if (!liveIds.has(model.id)) {
+      if (!retiredById.has(model.id)) {
+        retiredById.set(model.id, { id: model.id, at: now, source: "catalog" });
+      }
+    }
+  }
+
+  return {
+    retired: [...retiredById.values()],
+    broken: [...brokenById.values()],
+  };
 }
 
 export async function getCachedCatalog(providerId) {
@@ -155,7 +202,12 @@ export async function getCatalogModelIds(providerId) {
   const cached = await getProviderCatalogEntry(entry.id);
   if (!cached || !Array.isArray(cached.models) || cached.models.length === 0) return null;
   const retired = new Set((cached.retired || []).map((item) => item?.id).filter(Boolean));
-  return new Set(cached.models.map((model) => model.id).filter((id) => !retired.has(id)));
+  const broken = new Set((cached?.broken || []).map((item) => item?.id).filter(Boolean));
+  const okModels = new Set(cached.models.map((model) => model.id));
+  okModels.forEach((id) => {
+    if (retired.has(id) || broken.has(id)) okModels.delete(id);
+  });
+  return okModels;
 }
 
 export function isModelRetired(cached, modelId) {
@@ -163,11 +215,35 @@ export function isModelRetired(cached, modelId) {
   return (cached.retired || []).some((item) => item?.id === modelId);
 }
 
+export function isModelBroken(cached, modelId) {
+  if (!cached || !modelId) return false;
+  return (cached.broken || []).some((item) => item?.id === modelId);
+}
+
+export async function markModelBroken(providerId, modelId, reason = "model_404") {
+  const entry = getRegistryEntry(providerId);
+  const model = String(modelId || "").trim();
+  if (!entry?.catalog || !model) return false;
+  try {
+    const cached = (await getProviderCatalogEntry(entry.id)) || {
+      provider: entry.id, fetchedAt: null, models: [], retired: [], broken: [],
+    };
+    const broken = Array.isArray(cached.broken) ? [...cached.broken] : [];
+    if (!broken.some((item) => item?.id === model)) {
+      broken.push({ id: model, at: new Date().toISOString(), reason });
+    }
+    await setProviderCatalogEntry(entry.id, { ...cached, broken });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function refreshProviderCatalog(providerId, { force = false, connectionId = null } = {}) {
   const entry = getRegistryEntry(providerId);
   const config = entry?.catalog;
   if (!entry || !config) {
-    return { provider: providerId, models: [], retired: [], error: "not_catalog_provider" };
+    return { provider: providerId, models: [], retired: [], broken: [], error: "not_catalog_provider" };
   }
 
   const cached = await getProviderCatalogEntry(entry.id);
@@ -189,6 +265,9 @@ export async function refreshProviderCatalog(providerId, { force = false, connec
       return (a.priority ?? 0) - (b.priority ?? 0);
     });
 
+  // Merge previous broken list (preserves 404/400 failures)
+  const prevBroken = cached?.broken || [];
+
   let lastError = null;
   for (const connection of connections.slice(0, 3)) {
     try {
@@ -198,12 +277,15 @@ export async function refreshProviderCatalog(providerId, { force = false, connec
         lastError = "empty_catalog";
         continue;
       }
+
+      const merged = mergeRetiredAndBroken(providerId, cached, models);
       const snapshot = {
         provider: entry.id,
         fetchedAt: new Date().toISOString(),
         connectionId: connection.id,
         models,
-        retired: mergeRetired(entry.id, cached?.retired, models),
+        retired: merged.retired,
+        broken: [...(cached?.broken || []), ...merged.broken],
       };
       await setProviderCatalogEntry(entry.id, snapshot);
       return snapshot;
@@ -213,8 +295,9 @@ export async function refreshProviderCatalog(providerId, { force = false, connec
   }
 
   // Fail-open: keep the previous snapshot, surface the failure for the caller.
+  // Inclui broken do cache anterior para não perder 404s conhecidos.
   return {
-    ...(cached || { provider: entry.id, fetchedAt: null, models: [], retired: [] }),
+    ...(cached || { provider: entry.id, fetchedAt: null, models: [], retired: [], broken: [] }),
     error: lastError || (connections.length === 0 ? "no_active_connection" : "fetch_failed"),
   };
 }
@@ -225,7 +308,7 @@ export async function markModelRetired(providerId, modelId) {
   if (!entry?.catalog || !model) return false;
   try {
     const cached = (await getProviderCatalogEntry(entry.id)) || {
-      provider: entry.id, fetchedAt: null, models: [], retired: [],
+      provider: entry.id, fetchedAt: null, models: [], retired: [], broken: [],
     };
     const retired = Array.isArray(cached.retired) ? [...cached.retired] : [];
     if (!retired.some((item) => item?.id === model)) {

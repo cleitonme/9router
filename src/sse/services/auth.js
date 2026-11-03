@@ -354,6 +354,18 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
         const { markModelRetired } = await import("@/lib/services/providerCatalog.js");
         await markModelRetired(provider, model);
       } catch { /* fail-open */ }
+    } else if (classification?.type === "model_not_found" || classification?.type === "route_incompatible") {
+      // For catalog providers, mark as broken so it drops from the live list
+      // after a refresh; otherwise just cooldown (short skip).
+      try {
+        const { isCatalogProvider, markModelBroken } = await import("@/lib/services/providerCatalog.js");
+        if (isCatalogProvider(provider)) {
+          const reason = classification?.type === "model_not_found"
+            ? "upstream_404"
+            : "upstream_400";
+          await markModelBroken(provider, model, reason);
+        }
+      } catch { /* fail-open */ }
     }
     return { shouldFallback: true, cooldownMs, classification };
   } else if (classification?.type === "model_not_found" && classification?.scope === "account") {
