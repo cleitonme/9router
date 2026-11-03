@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { Badge, Button, Card, CardSkeleton, Input, Modal, Toggle, ConfirmModal } from "@/shared/components";
 import { useNotificationStore } from "@/store/notificationStore";
+import WebshareConfigCard from "./components/WebshareConfigCard";
 
 function getStatusVariant(status) {
   if (status === "active") return "success";
@@ -65,6 +66,7 @@ export default function ProxyPoolsPage() {
   const [bulkBusy, setBulkBusy] = useState(false);
   const [confirmState, setConfirmState] = useState(null);
   const [defaultPoolId, setDefaultPoolId] = useState("");
+  const [webshareConfig, setWebshareConfig] = useState({});
   // Filtros de visualização
   const [searchQuery, setSearchQuery] = useState("");
   const [filterCity, setFilterCity] = useState("all");
@@ -105,6 +107,7 @@ export default function ProxyPoolsPage() {
       if (resSettings.ok) {
         const sData = await resSettings.json();
         setDefaultPoolId(sData.defaultProxyPoolId || "");
+        setWebshareConfig(sData.webshareSync || {});
       }
     } catch (error) {
       console.log("Error fetching proxy pools:", error);
@@ -1105,6 +1108,14 @@ export default function ProxyPoolsPage() {
           </div>
         )}
       </Card>
+
+      <WebshareConfigCard
+        settings={{
+          webshareSync: webshareConfig,
+        }}
+        onUpdate={fetchProxyPools}
+        onSync={fetchProxyPools}
+      />
 
       <Modal
         isOpen={showBatchImportModal}

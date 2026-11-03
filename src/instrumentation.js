@@ -14,5 +14,9 @@ export async function register() {
     // Conservative periodic re-verification (default OFF via settings).
     const { startModelHealthScheduler } = await import("@/lib/modelHealth/scheduler.js");
     startModelHealthScheduler();
+
+    // Webshare proxy pool auto-sync scheduler
+    const { startWebshareSyncScheduler } = await import("@/lib/proxyPools/webshareSyncScheduler.js");
+    startWebshareSyncScheduler();
   }
 }

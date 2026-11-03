@@ -83,6 +83,23 @@ const DEFAULT_SETTINGS = {
   // Per-provider overrides (dashboard providers page). Same keys as above,
   // plus discovery/test toggles. Absent provider = inherit global.
   providerHealth: {},
+  // Webshare proxy pool auto-sync configuration
+  webshareSync: {
+    apiKey: "",
+    mode: "direct",
+    pageSize: 100,
+    planId: null,
+    autoReplaceOnWebshare: true,
+    removeDeadFrom9Router: true,
+    autoSync: false,
+    syncIntervalMinutes: 60,
+    lastSyncAt: null,
+    stats: {
+      totalPools: 0,
+      activePools: 0,
+      syncCount: 0,
+    },
+  },
 };
 
 async function readRaw() {
