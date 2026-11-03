@@ -118,6 +118,36 @@ export async function listModelHealth() {
   }
 }
 
+/**
+ * Model ids durably marked unavailable_provider (retired/EOL) for a provider.
+ * Used by /v1/models to stop advertising a model that already 410'd before the
+ * next live-catalogue refresh. Manual/account-scoped entries are ignored.
+ * Never throws; returns an empty set on failure.
+ * @param {string|string[]} providerIds - provider id and/or aliases
+ * @returns {Promise<Set<string>>}
+ */
+export async function getUnavailableModelIds(providerIds) {
+  const wanted = new Set(
+    (Array.isArray(providerIds) ? providerIds : [providerIds])
+      .filter(Boolean)
+      .map((id) => String(id).toLowerCase()),
+  );
+  if (wanted.size === 0) return new Set();
+  const out = new Set();
+  try {
+    const all = await getAllModelHealth();
+    for (const entry of Object.values(all)) {
+      if (!entry || typeof entry !== "object") continue;
+      if (entry.status !== MODEL_HEALTH_STATUS.UNAVAILABLE_PROVIDER) continue;
+      if (entry.scope !== "model" && entry.scope !== "provider") continue;
+      if (!entry.model || entry.model === "__all") continue;
+      if (!entry.provider || !wanted.has(String(entry.provider).toLowerCase())) continue;
+      out.add(entry.model);
+    }
+  } catch { /* fail-open */ }
+  return out;
+}
+
 export async function clearModelHealth({ connectionId, provider, model } = {}) {
   try {
     await removeModelHealthEntry(modelHealthKey({ connectionId, provider, model }));

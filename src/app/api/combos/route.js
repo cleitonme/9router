@@ -6,6 +6,10 @@ import {
   matchModelsWithLeaderboard,
   validateIntelligenceConfig,
 } from "@/lib/services/artificialAnalysis";
+import {
+  buildProviderCatalogComboModels,
+  validateProviderCatalogConfig,
+} from "@/lib/services/providerCatalogCombo";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +31,8 @@ export async function GET() {
 export async function POST(request) {
   try {
     const body = await request.json();
-    const { name, models, kind, config } = body;
+    const { name, models, kind: requestedKind, config } = body;
+    let kind = requestedKind;
 
     if (!name) {
       return NextResponse.json({ error: "Name is required" }, { status: 400 });
@@ -59,6 +64,24 @@ export async function POST(request) {
         ...comboConfig,
         lastRefreshedAt: new Date().toISOString(),
         matchedDetails: matched.details,
+      };
+    } else if (config?.type === "provider-catalog") {
+      try {
+        comboConfig = validateProviderCatalogConfig(config);
+      } catch (error) {
+        return NextResponse.json({ error: error.message }, { status: 400 });
+      }
+      const built = await buildProviderCatalogComboModels(comboConfig, { force: true });
+      if (built.models.length === 0) {
+        return NextResponse.json({ error: "No usable provider catalog models found" }, { status: 400 });
+      }
+      kind = "managed";
+      comboModels = built.models;
+      comboConfig = {
+        ...comboConfig,
+        lastRefreshedAt: new Date().toISOString(),
+        matchedDetails: built.details,
+        lastRefreshWarning: built.warning || null,
       };
     }
 

@@ -4,6 +4,10 @@ import {
   matchModelsWithLeaderboard,
   validateIntelligenceConfig,
 } from "./artificialAnalysis.js";
+import {
+  buildProviderCatalogComboModels,
+  validateProviderCatalogConfig,
+} from "./providerCatalogCombo.js";
 import { buildModelsList } from "@/app/api/v1/models/route.js";
 import { resetComboRotation } from "open-sse/services/combo.js";
 
@@ -17,6 +21,55 @@ const SCHEDULE_INTERVALS_MS = {
 
 let schedulerTimer = null;
 
+// Rebuild a provider-catalog combo from the live catalogue. Fail-open: if the
+// upstream fetch yields nothing, keep the current list instead of stranding
+// the combo (the static seed is already used as a fallback inside the builder).
+async function refreshProviderCatalogCombo(combo, config, now = Date.now()) {
+  let validated;
+  try {
+    validated = validateProviderCatalogConfig(config);
+  } catch (error) {
+    console.warn(`[ComboScheduler] Skipping invalid provider-catalog combo "${combo.name}": ${error.message}`);
+    return;
+  }
+
+  const schedule = validated.refreshSchedule;
+  if (!schedule || schedule === "manual") return;
+  const intervalMs = SCHEDULE_INTERVALS_MS[schedule];
+  if (!intervalMs) return;
+
+  const lastRefreshed = config.lastRefreshedAt ? new Date(config.lastRefreshedAt).getTime() : 0;
+  if (now - lastRefreshed < intervalMs) return;
+
+  console.log(`[ComboScheduler] Auto-refreshing provider-catalog combo "${combo.name}" (${schedule})...`);
+  const built = await buildProviderCatalogComboModels(validated, { force: true });
+  if (!built.models.length) {
+    console.warn(`[ComboScheduler] Keeping "${combo.name}" unchanged: catalog returned no usable models.`);
+    return;
+  }
+
+  const refreshed = await updateCombo(
+    combo.id,
+    {
+      models: built.models,
+      kind: "managed",
+      config: {
+        ...validated,
+        lastRefreshedAt: new Date().toISOString(),
+        matchedDetails: built.details,
+        lastRefreshWarning: built.warning || null,
+      },
+    },
+    { expectedUpdatedAt: combo.updatedAt },
+  );
+  if (!refreshed) {
+    console.log(`[ComboScheduler] Skipped "${combo.name}" because it changed during refresh.`);
+    return;
+  }
+  resetComboRotation(combo.name);
+  console.log(`[ComboScheduler] Refreshed "${combo.name}" with ${built.models.length} models.`);
+}
+
 export async function checkAndRefreshIntelligenceCombos() {
   try {
     const combos = await getCombos();
@@ -26,7 +79,14 @@ export async function checkAndRefreshIntelligenceCombos() {
 
     for (const combo of combos) {
       const config = combo.config;
-      if (!config || config.type !== "intelligence") continue;
+      if (!config) continue;
+
+      if (config.type === "provider-catalog") {
+        await refreshProviderCatalogCombo(combo, config, now);
+        continue;
+      }
+
+      if (config.type !== "intelligence") continue;
 
       let validated;
       try {

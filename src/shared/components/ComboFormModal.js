@@ -5,6 +5,8 @@ import Modal from "./Modal";
 import Input from "./Input";
 import Button from "./Button";
 import ModelSelectModal from "./ModelSelectModal";
+import Toggle from "./Toggle";
+import { CATALOG_PROVIDERS } from "@/shared/constants/providers";
 
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
 
@@ -58,12 +60,21 @@ export default function ComboFormModal({ isOpen, combo, onClose, onSave, activeP
   const [name, setName] = useState(initialName);
   const [models, setModels] = useState(combo?.models || []);
   const initialIntelligenceConfig = combo?.config?.type === "intelligence" ? combo.config : null;
-  const [comboType, setComboType] = useState(initialIntelligenceConfig ? "intelligence" : "manual");
+  const initialCatalogConfig = combo?.config?.type === "provider-catalog" ? combo.config : null;
+  const catalogProviderIds = Object.keys(CATALOG_PROVIDERS);
+  const [comboType, setComboType] = useState(
+    initialIntelligenceConfig ? "intelligence" : initialCatalogConfig ? "provider-catalog" : "manual"
+  );
   const [minScore, setMinScore] = useState(initialIntelligenceConfig?.minScore ?? "");
   const [maxScore, setMaxScore] = useState(initialIntelligenceConfig?.maxScore ?? "");
   const [modelLimit, setModelLimit] = useState(initialIntelligenceConfig?.limit ?? "");
   const [refreshSchedule, setRefreshSchedule] = useState(initialIntelligenceConfig?.refreshSchedule || "daily");
   const [excludeKeywords, setExcludeKeywords] = useState((initialIntelligenceConfig?.excludeKeywords || []).join(", "));
+  const [catalogProvider, setCatalogProvider] = useState(initialCatalogConfig?.provider || catalogProviderIds[0] || "");
+  const [catalogFreeOnly, setCatalogFreeOnly] = useState(initialCatalogConfig?.freeOnly ?? true);
+  const [catalogLimit, setCatalogLimit] = useState(initialCatalogConfig?.limit ?? "");
+  const [catalogSchedule, setCatalogSchedule] = useState(initialCatalogConfig?.refreshSchedule || "daily");
+  const [catalogExclude, setCatalogExclude] = useState((initialCatalogConfig?.excludeKeywords || []).join(", "));
   const [showModelSelect, setShowModelSelect] = useState(false);
   const [saving, setSaving] = useState(false);
   const [nameError, setNameError] = useState("");
@@ -119,6 +130,17 @@ export default function ComboFormModal({ isOpen, combo, onClose, onSave, activeP
         return;
       }
     }
+    if (comboType === "provider-catalog") {
+      if (!catalogProvider) {
+        setNameError("Choose a provider with a live catalogue");
+        return;
+      }
+      const limit = catalogLimit === "" ? null : Number(catalogLimit);
+      if (limit != null && (!Number.isInteger(limit) || limit < 1 || limit > 50)) {
+        setNameError("Model limit must be a whole number from 1 to 50");
+        return;
+      }
+    }
     setSaving(true);
     const config = comboType === "intelligence"
       ? {
@@ -129,8 +151,18 @@ export default function ComboFormModal({ isOpen, combo, onClose, onSave, activeP
           excludeKeywords: excludeKeywords.split(",").map((k) => k.trim()).filter(Boolean),
           refreshSchedule,
         }
-      : null;
-    await onSave({ name: forcePrefix + name.trim(), models, config });
+      : comboType === "provider-catalog"
+        ? {
+            type: "provider-catalog",
+            provider: catalogProvider,
+            freeOnly: catalogFreeOnly,
+            limit: catalogLimit === "" ? null : Number(catalogLimit),
+            excludeKeywords: catalogExclude.split(",").map((k) => k.trim()).filter(Boolean),
+            refreshSchedule: catalogSchedule,
+          }
+        : null;
+    const kind = comboType === "provider-catalog" ? "managed" : undefined;
+    await onSave({ name: forcePrefix + name.trim(), models, kind, config });
     setSaving(false);
   };
 
@@ -167,7 +199,10 @@ export default function ComboFormModal({ isOpen, combo, onClose, onSave, activeP
               className="w-full rounded border border-black/10 bg-white px-2 py-1.5 text-sm text-text-main outline-none focus:border-primary dark:border-white/10 dark:bg-black/20"
             >
               <option value="manual">Manual model list</option>
-              <option value="intelligence">Intelligence range — Artificial Analysis</option>
+              <option value="intelligence">Intelligence range - Artificial Analysis</option>
+              {catalogProviderIds.length > 0 && (
+                <option value="provider-catalog">Provider catalog - auto-managed</option>
+              )}
             </select>
             {comboType === "intelligence" && (
               <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -200,6 +235,52 @@ export default function ComboFormModal({ isOpen, combo, onClose, onSave, activeP
                 <p className="sm:col-span-2 text-[11px] text-text-muted">Uses the current Artificial Analysis intelligence index and only keeps models currently available through your configured providers. Saving refreshes the list immediately.</p>
               </div>
             )}
+            {comboType === "provider-catalog" && (
+              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <div className="flex flex-col gap-1.5 sm:col-span-2">
+                  <label className="text-sm font-medium text-text-main">Provider</label>
+                  <select
+                    value={catalogProvider}
+                    onChange={(e) => setCatalogProvider(e.target.value)}
+                    className="w-full rounded border border-black/10 bg-white px-2 py-2.5 text-sm text-text-main outline-none focus:border-primary dark:border-white/10 dark:bg-black/20"
+                  >
+                    {catalogProviderIds.map((id) => (
+                      <option key={id} value={id}>
+                        {CATALOG_PROVIDERS[id]?.name || id}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <Input label="Maximum models" type="number" min="1" max="50" step="1" value={catalogLimit} onChange={(e) => setCatalogLimit(e.target.value)} placeholder="No limit" />
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-sm font-medium text-text-main">Refresh</label>
+                  <select value={catalogSchedule} onChange={(e) => setCatalogSchedule(e.target.value)}
+                    className="w-full rounded border border-black/10 bg-white px-2 py-2.5 text-sm text-text-main outline-none focus:border-primary dark:border-white/10 dark:bg-black/20">
+                    <option value="manual">Manual only</option>
+                    <option value="hourly">Hourly</option>
+                    <option value="6hours">Every 6 hours</option>
+                    <option value="12hours">Every 12 hours</option>
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                  </select>
+                </div>
+                <div className="flex items-center gap-2 sm:col-span-2">
+                  <Toggle checked={catalogFreeOnly} onChange={setCatalogFreeOnly} aria-label="Only free models" />
+                  <span className="text-sm text-text-main">Only models with free quota</span>
+                </div>
+                <div className="flex flex-col gap-1.5 sm:col-span-2">
+                  <label className="text-sm font-medium text-text-main">Exclude keywords</label>
+                  <input
+                    type="text"
+                    value={catalogExclude}
+                    onChange={(e) => setCatalogExclude(e.target.value)}
+                    placeholder="e.g. embed, rerank"
+                    className="w-full rounded border border-black/10 bg-white px-2 py-2.5 text-sm text-text-main outline-none focus:border-primary dark:border-white/10 dark:bg-black/20"
+                  />
+                </div>
+                <p className="sm:col-span-2 text-[11px] text-text-muted">The combo is rebuilt from the provider&apos;s authenticated live catalogue: new models are added, retired/410 models are dropped. Managed mode is always enabled. Saving refreshes the list immediately.</p>
+              </div>
+            )}
           </div>
 
           {comboType === "manual" ? (
@@ -229,7 +310,8 @@ export default function ComboFormModal({ isOpen, combo, onClose, onSave, activeP
           </div>
           ) : (
             <div className="rounded-lg border border-dashed border-primary/30 bg-primary/[0.03] px-3 py-2.5 text-xs text-text-muted">
-              <span className="font-medium text-text-main">Selected models</span> are calculated from the leaderboard when you save or refresh this combo.
+              <span className="font-medium text-text-main">Selected models</span> are calculated
+              {comboType === "provider-catalog" ? " from the provider's live catalogue" : " from the leaderboard"} when you save or refresh this combo.
               {models.length > 0 && <span className="block mt-1 font-mono">Current: {models.join(", ")}</span>}
             </div>
           )}

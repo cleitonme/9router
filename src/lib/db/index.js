@@ -67,6 +67,12 @@ export {
   getAllModelHealth, removeModelHealthEntry,
 } from "./repos/modelHealthRepo.js";
 
+// Live provider catalogues (kv scope "providerCatalog")
+export {
+  getProviderCatalogEntry, setProviderCatalogEntry,
+  getAllProviderCatalogs, removeProviderCatalogEntry,
+} from "./repos/providerCatalogRepo.js";
+
 // Usage
 export {
   statsEmitter, trackPendingRequest, getActiveRequests,
@@ -96,6 +102,7 @@ export async function exportDb() {
     mitmAlias: {},
     pricing: {},
     modelHealth: {},
+    providerCatalog: {},
   };
 
   for (const r of db.all(`SELECT key, value FROM kv WHERE scope = 'modelAliases'`)) out.modelAliases[r.key] = parseJson(r.value);
@@ -103,6 +110,7 @@ export async function exportDb() {
   for (const r of db.all(`SELECT key, value FROM kv WHERE scope = 'mitmAlias'`)) out.mitmAlias[r.key] = parseJson(r.value);
   for (const r of db.all(`SELECT key, value FROM kv WHERE scope = 'pricing'`)) out.pricing[r.key] = parseJson(r.value);
   for (const r of db.all(`SELECT key, value FROM kv WHERE scope = 'modelHealth'`)) out.modelHealth[r.key] = parseJson(r.value);
+  for (const r of db.all(`SELECT key, value FROM kv WHERE scope = 'providerCatalog'`)) out.providerCatalog[r.key] = parseJson(r.value);
 
   return out;
 }
@@ -121,7 +129,7 @@ export async function importDb(payload) {
     db.run(`DELETE FROM proxyPools`);
     db.run(`DELETE FROM apiKeys`);
     db.run(`DELETE FROM combos`);
-    db.run(`DELETE FROM kv WHERE scope IN ('modelAliases', 'customModels', 'mitmAlias', 'pricing', 'modelHealth')`);
+    db.run(`DELETE FROM kv WHERE scope IN ('modelAliases', 'customModels', 'mitmAlias', 'pricing', 'modelHealth', 'providerCatalog')`);
 
     // Settings
     if (payload.settings) {
@@ -176,6 +184,9 @@ export async function importDb(payload) {
     }
     for (const [k, v] of Object.entries(payload.modelHealth || {})) {
       db.run(`INSERT OR REPLACE INTO kv(scope, key, value) VALUES('modelHealth', ?, ?)`, [k, stringifyJson(v || {})]);
+    }
+    for (const [k, v] of Object.entries(payload.providerCatalog || {})) {
+      db.run(`INSERT OR REPLACE INTO kv(scope, key, value) VALUES('providerCatalog', ?, ?)`, [k, stringifyJson(v || {})]);
     }
   });
 

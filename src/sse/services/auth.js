@@ -347,6 +347,14 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
         errorText: typeof errorText === "string" ? errorText.slice(0, 300) : null,
       });
     } catch { /* fail-open: kv write must never break routing */ }
+    if (classification?.type === "model_retired") {
+      // Hide it from the live catalogue immediately; the next refresh reconciles
+      // with upstream and re-enables the id if it ever comes back.
+      try {
+        const { markModelRetired } = await import("@/lib/services/providerCatalog.js");
+        await markModelRetired(provider, model);
+      } catch { /* fail-open */ }
+    }
     return { shouldFallback: true, cooldownMs, classification };
   } else if (classification?.type === "model_not_found" && classification?.scope === "account") {
     // Model exists but is not enabled for THIS account: account-scoped skip.

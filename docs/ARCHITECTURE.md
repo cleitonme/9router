@@ -419,6 +419,7 @@ flowchart LR
 
 - `src/app/api/v1/*`, `src/app/api/v1beta/*`: compatibility APIs
 - `src/app/api/providers*`: provider CRUD, validation, testing
+- `src/app/api/providers/[id]/catalog`: authenticated live catalogue snapshot / force refresh (`catalog` registry field)
 - `src/app/api/provider-nodes*`: custom compatible node management
 - `src/app/api/oauth/*`: OAuth/device-code flows
 - `src/app/api/keys*`: local API key lifecycle
@@ -434,6 +435,8 @@ flowchart LR
 - `src/sse/handlers/chat.js`: request parse, combo handling, account selection loop
 - `open-sse/handlers/chatCore.js`: translation, executor dispatch, retry/refresh handling, stream setup
 - `open-sse/executors/*`: provider-specific network and format behavior
+- `src/lib/services/providerCatalog.js`: authenticated provider `/v1/models` fetch + `kv providerCatalog` cache + `retired[]` overlay (fail-open)
+- `src/lib/services/providerCatalogCombo.js`: `provider-catalog` auto-managed combos (rebuild, ordering, filters, seed fallback)
 
 ### Translation Registry and Format Converters
 

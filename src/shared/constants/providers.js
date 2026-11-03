@@ -31,6 +31,7 @@ function buildProviderEntry(r) {
     ...(r.hasProviderSpecificData ? { hasProviderSpecificData: true } : {}),
     ...(r.noAuth ? { noAuth: true } : {}),
     ...(r.passthroughModels ? { passthroughModels: true } : {}),
+    ...(r.catalog ? { catalog: r.catalog } : {}),
     ...(r.hasOAuth ? { hasOAuth: true } : {}),
     ...(r.authModes ? { authModes: r.authModes } : {}),
     ...(r.authType ? { authType: r.authType } : {}),
@@ -64,6 +65,13 @@ export const THINKING_CONFIG = {
 
 export const OAUTH_PROVIDERS = byCategory("oauth");
 export const APIKEY_PROVIDERS = byCategory("apikey");
+
+// Providers with an authenticated live catalogue (`catalog`). Used by the
+// dashboard to offer "provider catalog" auto-managed combos. The actual fetch
+// happens server-side with the connection key.
+export const CATALOG_PROVIDERS = Object.fromEntries(
+  REGISTRY.filter((r) => r.catalog).map((r) => [r.id, buildProviderEntry(r)])
+);
 
 // Web Cookie Providers (use browser session cookie instead of API key)
 export const WEB_COOKIE_PROVIDERS = byCategory("webCookie");

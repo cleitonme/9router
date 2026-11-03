@@ -21,5 +21,7 @@ export {
   getPricing, getPricingForModel, updatePricing, resetPricing, resetAllPricing,
   modelHealthKey, getModelHealthEntry, setModelHealthEntry,
   getAllModelHealth, removeModelHealthEntry,
+  getProviderCatalogEntry, setProviderCatalogEntry,
+  getAllProviderCatalogs, removeProviderCatalogEntry,
   exportDb, importDb,
 } from "@/lib/db/index.js";

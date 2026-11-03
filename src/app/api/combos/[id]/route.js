@@ -6,6 +6,10 @@ import {
   matchModelsWithLeaderboard,
   validateIntelligenceConfig,
 } from "@/lib/services/artificialAnalysis";
+import {
+  buildProviderCatalogComboModels,
+  validateProviderCatalogConfig,
+} from "@/lib/services/providerCatalogCombo";
 import { resetComboRotation } from "open-sse/services/combo.js";
 
 // Validate combo name: only a-z, A-Z, 0-9, -, _
@@ -69,6 +73,28 @@ export async function PUT(request, { params }) {
           ...config,
           lastRefreshedAt: new Date().toISOString(),
           matchedDetails: matched.details,
+        },
+      };
+    } else if (body.config?.type === "provider-catalog") {
+      let config;
+      try {
+        config = validateProviderCatalogConfig(body.config);
+      } catch (error) {
+        return NextResponse.json({ error: error.message }, { status: 400 });
+      }
+      const built = await buildProviderCatalogComboModels(config, { force: true });
+      if (built.models.length === 0) {
+        return NextResponse.json({ error: "No usable provider catalog models found" }, { status: 400 });
+      }
+      update = {
+        ...body,
+        kind: "managed",
+        models: built.models,
+        config: {
+          ...config,
+          lastRefreshedAt: new Date().toISOString(),
+          matchedDetails: built.details,
+          lastRefreshWarning: built.warning || null,
         },
       };
     }

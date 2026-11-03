@@ -20,6 +20,12 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
+import {
+  getCatalogModelIds,
+  isCatalogProvider,
+  maybeRefreshCatalogInBackground,
+} from "@/lib/services/providerCatalog.js";
+import { getUnavailableModelIds } from "@/lib/modelHealth/service.js";
 
 // Qoder shares one live resolver across intl (qoder) and CN (qoder-cn); the
 // credentials carry the provider id so qoderModels picks the right region's
@@ -486,8 +492,30 @@ export async function buildModelsList(kindFilter, options = {}) {
           )
         : providerModels.map((model) => model.id);
 
+      // Authenticated live catalogue (e.g. NVIDIA NIM). When cached, it is the
+      // upstream truth: new ids appear and retired ones disappear without a
+      // registry edit. On a miss, serve the seed now and refresh in background.
+      const hasLiveCatalog = isCatalogProvider(providerId);
+      if (hasLiveCatalog && !hasExplicitEnabledModels) {
+        const catalogIds = await getCatalogModelIds(providerId);
+        if (catalogIds) rawModelIds = [...catalogIds];
+        else if (!skipDynamicFetch) maybeRefreshCatalogInBackground(providerId);
+      }
+
       if (isCompatibleProvider && rawModelIds.length === 0 && !skipDynamicFetch) {
         rawModelIds = await fetchCompatibleModelIds(conn);
+      }
+
+      // Stop advertising models already proven retired/EOL (410) even before
+      // the next catalogue refresh. Catalog providers only: other providers
+      // keep their full list so routing fallback stays predictable.
+      let unavailableModelIds = null;
+      if (hasLiveCatalog) {
+        try {
+          unavailableModelIds = await getUnavailableModelIds([
+            providerId, staticAlias, outputAlias,
+          ]);
+        } catch { unavailableModelIds = null; }
       }
 
       // Config-driven live catalog override (e.g. Kiro returns dynamic
@@ -574,6 +602,7 @@ export async function buildModelsList(kindFilter, options = {}) {
       const mergedModelIds = Array.from(new Set([...modelIds, ...customModelIds, ...aliasModelIds]));
 
       for (const modelId of mergedModelIds) {
+        if (unavailableModelIds?.has(modelId)) continue;
         // Resolve kind: prefer custom/live metadata, then static, then ID heuristics.
         const customKind = customModelKindById.get(modelId);
         const liveKind = liveModelKindById.get(modelId);

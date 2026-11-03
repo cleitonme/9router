@@ -6,6 +6,10 @@ import {
   validateIntelligenceConfig,
 } from "@/lib/services/artificialAnalysis";
 import { buildModelsList } from "@/app/api/v1/models/route";
+import {
+  buildProviderCatalogComboModels,
+  validateProviderCatalogConfig,
+} from "@/lib/services/providerCatalogCombo";
 import { resetComboRotation } from "open-sse/services/combo.js";
 
 export async function POST(request, { params }) {
@@ -16,8 +20,53 @@ export async function POST(request, { params }) {
     if (!combo) {
       return NextResponse.json({ error: "Combo not found" }, { status: 404 });
     }
+    if (combo.config?.type === "provider-catalog") {
+      let providerConfig;
+      try {
+        providerConfig = validateProviderCatalogConfig(combo.config);
+      } catch (error) {
+        return NextResponse.json({ error: error.message }, { status: 400 });
+      }
+      const built = await buildProviderCatalogComboModels(providerConfig, { force: true });
+      if (built.models.length === 0) {
+        // Never clear an auto combo on a failed/empty upstream read.
+        return NextResponse.json(
+          { success: false, error: "Provider catalog unavailable; combo left unchanged" },
+          { status: 502 }
+        );
+      }
+      const updated = await updateCombo(
+        id,
+        {
+          models: built.models,
+          kind: "managed",
+          config: {
+            ...providerConfig,
+            lastRefreshedAt: new Date().toISOString(),
+            matchedDetails: built.details,
+            lastRefreshWarning: built.warning || null,
+          },
+        },
+        { expectedUpdatedAt: combo.updatedAt }
+      );
+      if (!updated) {
+        return NextResponse.json(
+          { error: "Combo changed while refreshing; retry the refresh" },
+          { status: 409 }
+        );
+      }
+      resetComboRotation(combo.name);
+      return NextResponse.json({
+        success: true,
+        combo: updated,
+        newModelsCount: built.models.length,
+        details: built.details,
+        warning: built.warning || null,
+      });
+    }
+
     if (combo.config?.type !== "intelligence") {
-      return NextResponse.json({ error: "This combo is not intelligence-managed" }, { status: 400 });
+      return NextResponse.json({ error: "This combo is not auto-managed" }, { status: 400 });
     }
 
     const config = validateIntelligenceConfig(combo.config);

@@ -6,7 +6,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { getProviderIconSrc, markProviderIconMissing } from "@/shared/utils/providerIcon";
 import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, ZedAuthModal, XiaomiMimoAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal, WebCookieHelp } from "@/shared/components";
-import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
+import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS, CATALOG_PROVIDERS } from "@/shared/constants/providers";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
@@ -78,6 +78,10 @@ export default function ProviderDetailPage() {
   const [liveModels, setLiveModels] = useState([]);
   // Live-catalog fetch warning/error (surfaced for zed only; cursor behavior unchanged).
   const [liveModelsError, setLiveModelsError] = useState(null);
+  const catalogProvider = CATALOG_PROVIDERS[providerId] || null;
+  const [catalogSnapshot, setCatalogSnapshot] = useState(null);
+  const [catalogRefreshing, setCatalogRefreshing] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
   const [kiloFreeModels, setKiloFreeModels] = useState([]);
   const [disabledModelIds, setDisabledModelIds] = useState([]);
   const [confirmState, setConfirmState] = useState(null);
@@ -440,6 +444,37 @@ export default function ProviderDetailPage() {
       console.log("Error saving provider health config:", error);
     }
   };
+
+  const handleRefreshCatalog = async () => {
+    setCatalogRefreshing(true);
+    setCatalogError("");
+    try {
+      const res = await fetch(`/api/providers/${providerId}/catalog`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({}));
+      setCatalogSnapshot(data.catalog || null);
+      if (!res.ok || data.catalog?.error) {
+        setCatalogError(data.catalog?.error || data.error || "Catalog refresh failed");
+      }
+    } catch (error) {
+      setCatalogError(error.message || "Catalog refresh failed");
+    } finally {
+      setCatalogRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!catalogProvider) return;
+    let cancelled = false;
+    fetch(`/api/providers/${providerId}/catalog`, { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => { if (!cancelled) setCatalogSnapshot(data?.catalog || null); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [providerId, catalogProvider]);
 
   const handleHealthTestNow = async () => {
     setHealthTesting(true);
@@ -1645,6 +1680,33 @@ export default function ProviderDetailPage() {
                   <span className="text-xs text-text-muted">{healthTestResult}</span>
                 )}
               </div>
+              {/* Auth-based live catalogue (e.g. NVIDIA NIM /v1/models) */}
+              {catalogProvider && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-text-muted font-medium">Live catalog</span>
+                  <span className="text-xs text-text-muted">
+                    {catalogSnapshot?.models?.length
+                      ? `${catalogSnapshot.models.length} chat models`
+                      : "not fetched"}
+                    {catalogSnapshot?.retired?.length
+                      ? ` - ${catalogSnapshot.retired.length} retired`
+                      : ""}
+                    {catalogSnapshot?.fetchedAt
+                      ? ` - ${new Date(catalogSnapshot.fetchedAt).toLocaleString()}`
+                      : ""}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon="cloud_download"
+                    onClick={handleRefreshCatalog}
+                    disabled={catalogRefreshing}
+                  >
+                    {catalogRefreshing ? "Refreshing..." : "Refresh live catalog"}
+                  </Button>
+                  {catalogError && <span className="text-xs text-red-500">{catalogError}</span>}
+                </div>
+              )}
               {/* Round Robin toggle */}
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs text-text-muted font-medium">Round Robin</span>

@@ -21,16 +21,24 @@
     baseUrl: "https://integrate.api.nvidia.com/v1/chat/completions",
     validateUrl: "https://integrate.api.nvidia.com/v1/models",
   },
+  // Authenticated live catalog. Read by src/lib/services/providerCatalog.js to
+  // keep /v1/models and provider-catalog combos in sync with upstream (new ids
+  // appear, retired ones disappear) without editing this file.
+  catalog: {
+    url: "https://integrate.api.nvidia.com/v1/models",
+    auth: "bearer",
+    kind: "chat",
+  },
   // NIM's catalogue is large and moves fast. integrate.api.nvidia.com/v1/models
-  // requires a key, so there is no modelsFetcher here — the list below is a
-  // curated seed of the reasoning-capable text→text models (the ones that work
-  // through /v1/chat/completions), taken from models.dev's nvidia provider.
-  // Image-gen, video, embedding-only, rerank and safety models are omitted:
-  // they are served from other endpoints, not chat.
+  // requires a key, so the authenticated `catalog` below is fetched server-side
+  // with the connection's own key (never through the public suggested-models
+  // proxy). The list below is a curated seed of the reasoning-capable
+  // text-to-text models (the ones that work through /v1/chat/completions), taken from
+  // models.dev's nvidia provider. Image-gen, video, embedding-only, rerank and
+  // safety models are omitted: they are served from other endpoints, not chat.
   // passthroughModels keeps any newer id usable without a registry edit.
   models: [
     { id: "moonshotai/kimi-k3", name: "Kimi K3" },
-    { id: "z-ai/glm-5.3", name: "GLM 5.3" },
     { id: "z-ai/glm-5.3-flash", name: "GLM 5.3 Flash" },
     { id: "thinkingmachines/inkling", name: "Inkling" },
     { id: "deepseek-ai/deepseek-v4-pro-0813", name: "DeepSeek V4 Pro 0813" },

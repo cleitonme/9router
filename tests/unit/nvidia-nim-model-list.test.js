@@ -35,7 +35,6 @@ describe("nvidia registry model list", () => {
         const ids = nvidia.models.map((m) => m.id);
         for (const id of [
             "moonshotai/kimi-k3",
-            "z-ai/glm-5.3",
             "z-ai/glm-5.3-flash",
             "nvidia/nemotron-3.5-lightning-30b-a3b",
             "nvidia/nemotron-3-super-120b-a12b",
@@ -65,6 +64,18 @@ describe("nvidia registry model list", () => {
 
     it("declares no modelsFetcher, since the endpoint needs a key", () => {
         expect(nvidia.modelsFetcher).toBeUndefined();
+    });
+
+    it("declares an authenticated live catalog instead", () => {
+        // Fetched server-side with the connection key; never through the public
+        // suggested-models proxy.
+        expect(nvidia.catalog?.url).toBe("https://integrate.api.nvidia.com/v1/models");
+        expect(nvidia.catalog?.auth).toBe("bearer");
+        expect(nvidia.catalog?.kind).toBe("chat");
+    });
+
+    it("drops the retired GLM 5.3 seed (EOL on 2026-10-28)", () => {
+        expect(nvidia.models.map((m) => m.id)).not.toContain("z-ai/glm-5.3");
     });
 
     it("does not list models that chat/completions cannot serve", () => {
