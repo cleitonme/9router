@@ -707,6 +707,17 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       lastError = result.error;
       lastStatus = result.status;
       lastHeaders = upstreamResponseHeaders(result.response?.headers);
+      
+      // Safety check: if we've exhausted all accounts for this model (quota error),
+      // prevent infinite loop by checking if any credentials remain available.
+      // If no more accounts are available for this model, the provider check below
+      // will return allRateLimited and advance to the next model.
+      const checkCreds = await getProviderCredentials(provider, excludeConnectionIds, model, { requestedModel: requestedModel || model });
+      if (!checkCreds || checkCreds.allRateLimited) {
+        log.warn("QUOTA", `${provider} model=${model} all accounts exhausted for quota → advancing to next model request_id=${reqId}`);
+        return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts quota exhausted", lastHeaders);
+      }
+      
       retryCount += 1;
       continue;
     }
