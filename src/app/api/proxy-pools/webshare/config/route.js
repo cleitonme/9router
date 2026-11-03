@@ -32,8 +32,8 @@ export async function GET() {
     const config = settings?.webshareSync || {};
 
     return NextResponse.json({
-      apiKey: "",
       ...config,
+      apiKey: "",
     });
   } catch (error) {
     console.error("[Webshare Config] GET failed:", error);
@@ -88,11 +88,11 @@ export async function PATCH(request) {
     const config = normalizeConfig(body);
 
     const updates = {};
-    if (typeof config.apiKey === "string") {
+    if (typeof body.apiKey === "string" && body.apiKey.trim()) {
       updates["webshareSync.apiKey"] = config.apiKey;
     }
     if (body.autoSync !== undefined) updates["webshareSync.autoSync"] = config.autoSync;
-    if (typeof config.syncIntervalMinutes === "number") {
+    if (body.syncIntervalMinutes !== undefined) {
       updates["webshareSync.syncIntervalMinutes"] = config.syncIntervalMinutes;
     }
 

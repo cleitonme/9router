@@ -2,7 +2,7 @@
 
 import { useState, useCallback } from "react";
 import { Button, Input, Toggle, Badge, Card, Modal, ConfirmModal } from "@/shared/components";
-import { useNotificationStore } from "@/lib/store/notificationStore";
+import { useNotificationStore } from "@/store/notificationStore";
 
 function WebshareConfigCard({ settings, onUpdate, onSync }) {
   const ws = settings?.webshareSync || {};
