@@ -37,7 +37,9 @@ function load() {
 let _getProviderModelAllowlist = (providerId) => {
   const catalog = load();
   if (!catalog?.[providerId]) return null;
-  return new Set(Object.keys(catalog[providerId]));
+  const modelIds = Object.keys(catalog[providerId]);
+  if (modelIds.length === 0) return null;
+  return new Set(modelIds);
 };
 let _supportsTextInput = (providerId, modelId) => {
   const catalog = load();
@@ -66,7 +68,9 @@ export function __resetCatalogMocks() {
   _getProviderModelAllowlist = (providerId) => {
     const catalog = load();
     if (!catalog?.[providerId]) return null;
-    return new Set(Object.keys(catalog[providerId]));
+    const modelIds = Object.keys(catalog[providerId]);
+    if (modelIds.length === 0) return null;
+    return new Set(modelIds);
   };
   _supportsTextInput = (providerId, modelId) => {
     const catalog = load();

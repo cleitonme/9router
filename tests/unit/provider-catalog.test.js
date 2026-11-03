@@ -87,6 +87,19 @@ describe("filterChatModels", () => {
     ]);
     expect(got.map((m) => m.id)).toEqual(["acme/brand-new-chat"]);
   });
+
+  it("allows all models when provider has no non-text models in allowlist (empty allowlist)", () => {
+    const got = filterChatModels("nvidia", [
+      { id: "nvidia/deepseek-ai/deepseek-v4-flash" },
+      { id: "nvidia/z-ai/glm-5.2" },
+      { id: "nvidia/moonshotai/kimi-k2.6" },
+    ]);
+    expect(got.map((m) => m.id)).toEqual([
+      "nvidia/deepseek-ai/deepseek-v4-flash",
+      "nvidia/z-ai/glm-5.2",
+      "nvidia/moonshotai/kimi-k2.6",
+    ]);
+  });
 });
 
 describe("retired overlay", () => {
