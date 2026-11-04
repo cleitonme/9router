@@ -1,6 +1,6 @@
 // Persistent per-account/per-model health (kv scope "modelHealth").
 // Fail-open everywhere: kv failures must never break routing.
-import { MODEL_HEALTH_STATUS, MODEL_HEALTH_DEFAULTS, nextRetryFor } from "open-sse/config/modelHealthConfig.js";
+import { MODEL_HEALTH_STATUS, MODEL_HEALTH_DEFAULTS, nextRetryFor, MODEL_FAILURE_THRESHOLD } from "open-sse/config/modelHealthConfig.js";
 import {
   modelHealthKey,
   getModelHealthEntry,
@@ -48,6 +48,9 @@ export async function recordModelHealth({
     status = MODEL_HEALTH_STATUS.CONFIG_ERROR;
   } else if (reason === "unverified") {
     status = MODEL_HEALTH_STATUS.UNVERIFIED;
+  } else if (consecutiveFailures >= MODEL_FAILURE_THRESHOLD) {
+    // Auto-remove from combo after N consecutive failures (e.g. timeouts, 502s)
+    status = MODEL_HEALTH_STATUS.UNAVAILABLE_PROVIDER;
   } else {
     status = MODEL_HEALTH_STATUS.COOLDOWN;
   }
@@ -61,7 +64,7 @@ export async function recordModelHealth({
     connectionId: connectionId || prev?.connectionId || null,
     model: model || prev?.model || null,
     lastCheck: now,
-    nextRetry: ok ? null : nextRetryFor(reason, Date.now()),
+    nextRetry: ok ? null : nextRetryFor(reason, Date.now(), consecutiveFailures),
     consecutiveFailures,
     latencyMs: latencyMs ?? prev?.latencyMs ?? null,
     lastError: ok ? null : sanitizeText(errorText),

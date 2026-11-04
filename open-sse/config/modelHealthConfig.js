@@ -15,12 +15,18 @@ export const MODEL_HEALTH_SCOPE = {
   GATEWAY: "gateway",
 };
 
+// Number of consecutive failures before auto-removing from combo
+export const MODEL_FAILURE_THRESHOLD = 3;
+
+// Retry interval after model is auto-removed (30 minutes)
+export const MODEL_AUTO_RETRY_MS = 30 * 60 * 1000;
+
 // Re-verification intervals (ms). Permanent errors are rechecked rarely,
 // transient errors respect short cooldowns. All configurable via dashboard
 // settings (settings.modelHealth) — values here are conservative defaults.
 export const MODEL_HEALTH_DEFAULTS = {
   enabled: false,
-  mode: "observe", // "observe" (log only) | "enforce" (filter routing)
+  mode: "observe",
   checkIntervalMs: 60 * 60 * 1000,
   testTimeoutMs: 10 * 1000,
   testMaxTokens: 16,
@@ -31,11 +37,15 @@ export const MODEL_HEALTH_DEFAULTS = {
   historyLimit: 10,
 };
 
-export function nextRetryFor(reason, now = Date.now()) {
+export function nextRetryFor(reason, now = Date.now(), consecutiveFailures = 0) {
   const d = MODEL_HEALTH_DEFAULTS;
   if (reason === "model_retired") return new Date(now + d.retryPermanentMs).toISOString();
   if (reason === "payment_required" || reason === "invalid_credentials") {
     return new Date(now + d.retryAccountMs).toISOString();
+  }
+  // Auto-remove model after threshold failures
+  if (consecutiveFailures >= MODEL_FAILURE_THRESHOLD) {
+    return new Date(now + MODEL_AUTO_RETRY_MS).toISOString();
   }
   return new Date(now + d.retryTransientMs).toISOString();
 }
