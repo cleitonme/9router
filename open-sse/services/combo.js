@@ -65,10 +65,15 @@ function flattenToolHistory(messages) {
 
 // Reorder combo models by capability fit. Stable; never drops a model (fallback intact).
 // Tier 0: satisfies all hard + all soft. Tier 1: all hard only. Tier 2: rest.
-export function reorderByCapabilities(models, required) {
-  if (!required || required.size === 0 || !Array.isArray(models) || models.length <= 1) return models;
-  const hard = [...required].filter((c) => HARD_CAPS.has(c));
-  const soft = [...required].filter((c) => !HARD_CAPS.has(c));
+// Tiebreaker: lower latency (from modelHealth) floats to front within each tier.
+export function reorderByCapabilities(models, required, latencyMap = null) {
+  if (!Array.isArray(models) || models.length <= 1) return models;
+  
+  const hasRequired = required && required.size > 0;
+  if (!hasRequired && !latencyMap) return models;  // nothing to optimize
+  
+  const hard = [...(required || new Set())].filter((c) => HARD_CAPS.has(c));
+  const soft = [...(required || new Set())].filter((c) => !HARD_CAPS.has(c));
 
   const tierOf = (m) => {
     const slash = typeof m === "string" ? m.indexOf("/") : -1;
@@ -79,11 +84,57 @@ export function reorderByCapabilities(models, required) {
     return soft.every((c) => caps[c] === true) ? 0 : 1;
   };
 
-  // Stable sort by tier (Array.prototype.sort is stable in modern engines).
+  const latencyOf = (m) => latencyMap?.get(m) ?? Infinity;
+
+  // Stable sort by tier (if required), then by latency (lower = better)
+  if (hasRequired) {
+    return models
+      .map((m, i) => ({ m, i, t: tierOf(m), l: latencyOf(m) }))
+      .sort((a, b) => a.t - b.t || a.l - b.l || a.i - b.i)
+      .map((x) => x.m);
+  }
+  
+  // No required filters - sort by latency only
   return models
-    .map((m, i) => ({ m, i, t: tierOf(m) }))
-    .sort((a, b) => a.t - b.t || a.i - b.i)
+    .map((m, i) => ({ m, i, l: latencyOf(m) }))
+    .sort((a, b) => a.l - b.l || a.i - b.i)
     .map((x) => x.m);
+}
+
+/**
+ * Fetch latencyMap (model -> latencyMs) from modelHealth store.
+ * Returns a Map for quick lookup during combo reordering.
+ * Fail-open: returns null on any error.
+ */
+export async function fetchComboLatencies(modelStrs) {
+  if (!Array.isArray(modelStrs) || modelStrs.length === 0) return null;
+  try {
+    const { listModelHealth } = await import("../../src/lib/modelHealth/service.js");
+    const all = await listModelHealth();
+    if (!all || typeof all !== "object") return null;
+    
+    const latencyMap = new Map();
+    const now = Date.now();
+    
+    for (const modelStr of modelStrs) {
+      if (typeof modelStr !== "string") continue;
+      const slashIdx = modelStr.indexOf("/");
+      if (slashIdx < 0) continue;
+      
+      const provider = modelStr.slice(0, slashIdx).toLowerCase();
+      const model = modelStr.slice(slashIdx + 1).toLowerCase();
+      const key = `${provider}|${model}`;
+      const entry = all[key] || all[provider]?.[model];
+      
+      if (entry?.latencyMs && typeof entry.latencyMs === "number") {
+        latencyMap.set(modelStr, entry.latencyMs);
+      }
+    }
+    
+    return latencyMap.size > 0 ? latencyMap : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -384,13 +435,34 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   // Apply rotation strategy if enabled
   let rotatedModels = getRotatedModels(models, comboName, comboStrategy, comboStickyLimit);
 
-  // Auto-switch: float models that satisfy the request's required capabilities to the front.
+  // Auto-switch: float models that satisfy the request's required capabilities to the front,
+  // then sort by latency (faster models higher in the chain).
   if (autoSwitch) {
     const required = detectRequiredCapabilities(body);
+    
+    // Fetch latency map for all models
+    let latencyMap = null;
+    try {
+      latencyMap = await fetchComboLatencies(rotatedModels);
+    } catch {
+      // fail-open
+    }
+    
     if (required.size > 0) {
-      const reordered = reorderByCapabilities(rotatedModels, required);
+      const reordered = reorderByCapabilities(rotatedModels, required, latencyMap);
       if (reordered[0] !== rotatedModels[0]) {
         log.info("COMBO", `auto-switch for [${[...required].join(",")}] → ${reordered[0]}`);
+      }
+      rotatedModels = reordered;
+    } else if (latencyMap && latencyMap.size > 0 && rotatedModels.length > 1) {
+      // No capability requirements - just sort by latency
+      const reordered = [...rotatedModels].sort((a, b) => {
+        const la = latencyMap.get(a) ?? Infinity;
+        const lb = latencyMap.get(b) ?? Infinity;
+        return la - lb;
+      });
+      if (reordered[0] !== rotatedModels[0]) {
+        log.info("COMBO", `auto-sort by latency → ${reordered[0]}`);
       }
       rotatedModels = reordered;
     }
