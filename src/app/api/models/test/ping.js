@@ -1,6 +1,7 @@
 import { getApiKeys } from "@/lib/localDb";
 import { resolveProviderId } from "@/shared/constants/providers.js";
 import { unwrapClineEnvelope } from "open-sse/shared/clineEnvelope.js";
+import { MODEL_PROBE_TIMEOUT_MS } from "open-sse/config/runtimeConfig.js";
 import { UPDATER_CONFIG } from "@/shared/constants/config";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
 
@@ -162,36 +163,111 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
     return { ok: true, latencyMs, error: null, status: res.status };
   }
 
-  const res = await fetch(`${baseUrl}/api/v1/chat/completions`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model,
-      // 1024 tokens: reasoning models (ClinePass/kimi-k3, deepseek-v4-pro, etc.) spend
-      // their budget on chain-of-thought before emitting an answer. A tiny probe like
-      // max_tokens:16 starves the answer and yields a false "no choices" failure.
-      // See issue #3010.
-      max_tokens: 1024,
-      stream: false,
-      messages: [{ role: "user", content: "hi" }],
-    }),
-    signal: AbortSignal.timeout(15000),
-  });
-  const latencyMs = Date.now() - start;
+  // Probe chat models with a streamed request and stop at the first token.
+  // A full non-streamed answer makes slow reasoning models look dead: they burn
+  // the whole budget on chain-of-thought before returning anything. Any choice
+  // frame (even role-only or reasoning-only) proves the route works, so we
+  // cancel the stream immediately instead of waiting for the answer.
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, MODEL_PROBE_TIMEOUT_MS);
 
-  const rawText = await res.text().catch(() => "");
-  let parsed = null;
-  try { parsed = rawText ? JSON.parse(rawText) : null; } catch {}
+  try {
+    const res = await fetch(`${baseUrl}/api/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        // Sound budget for providers that ignore `stream` and return a whole
+        // answer. The stream is cancelled at the first token anyway.
+        max_tokens: 1024,
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      signal: controller.signal,
+    });
 
-  // Unwrap before the choices checks below. No-op for providers that do not
-  // opt in via transport.quirks.clineEnvelope.
-  const providerId = resolveProviderId(String(model).split("/")[0]);
-  parsed = unwrapClineEnvelope(parsed, providerId);
+    const providerId = resolveProviderId(String(model).split("/")[0]);
 
-  if (!res.ok) {
-    const detail = parsed?.error?.message || parsed?.msg || parsed?.message || parsed?.error || rawText;
-    return { ok: false, latencyMs, error: `HTTP ${res.status}${detail ? `: ${String(detail).slice(0, 500)}` : ""}`, status: res.status };
+    if (!res.ok) {
+      const rawText = await res.text().catch(() => "");
+      let parsed = null;
+      try { parsed = rawText ? JSON.parse(rawText) : null; } catch {}
+      parsed = unwrapClineEnvelope(parsed, providerId);
+      const detail = parsed?.error?.message || parsed?.msg || parsed?.message || parsed?.error || rawText;
+      return {
+        ok: false,
+        latencyMs: Date.now() - start,
+        error: `HTTP ${res.status}${detail ? `: ${String(detail).slice(0, 500)}` : ""}`,
+        status: res.status,
+      };
+    }
+
+    // Some providers/tests return a whole JSON body even when stream is asked.
+    if (!res.body) {
+      const rawText = await res.text().catch(() => "");
+      let parsed = null;
+      try { parsed = rawText ? JSON.parse(rawText) : null; } catch {}
+      parsed = unwrapClineEnvelope(parsed, providerId);
+      return evaluateParsedChat(parsed, res.status, start);
+    }
+
+    const unwrap = (json) => unwrapClineEnvelope(json, providerId);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let outcome = null;
+
+    while (!outcome) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      if (buffer.length > 256 * 1024) break;
+      outcome = scanProbeStream(buffer, unwrap);
+    }
+
+    if (!outcome) outcome = scanProbeStream(`${buffer}\n`, unwrap);
+
+    try { await reader.cancel(); } catch { /* upstream may already be closed */ }
+
+    if (outcome?.ok) {
+      return { ok: true, latencyMs: Date.now() - start, error: null, status: res.status };
+    }
+    if (outcome?.error) {
+      return {
+        ok: false,
+        latencyMs: Date.now() - start,
+        status: res.status,
+        error: String(outcome.error).slice(0, 240),
+      };
+    }
+    return {
+      ok: false,
+      latencyMs: Date.now() - start,
+      status: res.status,
+      error: "Provider returned no completion data for this model",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      latencyMs: Date.now() - start,
+      status: 0,
+      error: timedOut
+        ? `Probe timed out after ${MODEL_PROBE_TIMEOUT_MS}ms waiting for the first token`
+        : String(error?.message || error),
+    };
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+// Evaluate a whole (non-streamed) chat body. Kept for providers that ignore
+// `stream: true`, and mirrors the reasoning-model soft-pass from issue #3010.
+function evaluateParsedChat(parsed, status, start) {
+  const latencyMs = Date.now() - start;
 
   const providerStatus = parsed?.status;
   const providerMsg = parsed?.msg || parsed?.message;
@@ -203,7 +279,7 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
     return {
       ok: false,
       latencyMs,
-      status: res.status,
+      status,
       error: `Provider status ${providerStatus}: ${String(providerMsg).slice(0, 240)}`,
     };
   }
@@ -213,16 +289,12 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
     return {
       ok: false,
       latencyMs,
-      status: res.status,
+      status,
       error: String(providerError).slice(0, 240),
     };
   }
 
   const hasChoices = Array.isArray(parsed?.choices) && parsed.choices.length > 0;
-
-  // Soft-pass (issue #3010): a reasoning model may burn its whole budget on
-  // chain-of-thought and return finish_reason:"length" with empty content but
-  // non-empty reasoning/thinking. That's a successful connection, not a failure.
   const firstChoice = parsed?.choices?.[0] || {};
   const hasReasoning =
     firstChoice.message?.reasoning ||
@@ -231,17 +303,56 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
     firstChoice.message?.thinking_content;
   const contentEmpty = !String(firstChoice.message?.content || "").trim();
   if (hasChoices && firstChoice.finish_reason === "length" && contentEmpty && hasReasoning) {
-    return { ok: true, latencyMs, error: null, status: res.status, note: "reasoning-only response (length-limited)" };
+    return {
+      ok: true,
+      latencyMs,
+      status,
+      error: null,
+      note: "reasoning-only response (length-limited)",
+    };
   }
 
   if (!hasChoices) {
     return {
       ok: false,
       latencyMs,
-      status: res.status,
+      status,
       error: "Provider returned no completion choices for this model",
     };
   }
 
-  return { ok: true, latencyMs, error: null, status: res.status };
+  return { ok: true, latencyMs, status, error: null };
+}
+
+// Parse complete SSE/JSON lines from a probe buffer. Returns the first decisive
+// signal: a choice frame (route is alive) or an error frame (route is broken).
+// Incomplete trailing lines are ignored until the next chunk completes them.
+function scanProbeStream(buffer, unwrap) {
+  const lines = String(buffer || "").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    let json = null;
+    if (trimmed.startsWith("data:")) {
+      const payload = trimmed.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      try { json = JSON.parse(payload); } catch { continue; }
+    } else if (trimmed.startsWith("{")) {
+      try { json = JSON.parse(trimmed); } catch { continue; }
+    } else {
+      continue;
+    }
+
+    if (json && unwrap) json = unwrap(json);
+
+    if (json?.error) {
+      const error = json.error?.message || json.error?.msg || json.error;
+      return { error };
+    }
+    if (Array.isArray(json?.choices) && json.choices.length > 0) {
+      return { ok: true };
+    }
+  }
+  return null;
 }

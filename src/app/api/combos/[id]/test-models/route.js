@@ -77,6 +77,15 @@ export async function POST(request, { params }) {
       }
     }
 
+    // Fastest live model first; dead models keep the tail.
+    results.sort((a, b) => {
+      const okDiff = (b.ok ? 1 : 0) - (a.ok ? 1 : 0);
+      if (okDiff !== 0) return okDiff;
+      const la = typeof a.latencyMs === "number" && a.latencyMs > 0 ? a.latencyMs : Infinity;
+      const lb = typeof b.latencyMs === "number" && b.latencyMs > 0 ? b.latencyMs : Infinity;
+      return la - lb;
+    });
+
     const aliveCount = results.filter((r) => r.ok).length;
 
     return NextResponse.json({

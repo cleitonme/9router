@@ -102,7 +102,13 @@ export function reorderByCapabilities(models, required, latencyMap = null) {
 }
 
 /**
- * Fetch latencyMap (model -> latencyMs) from modelHealth store.
+ * Fetch latencyMap (model string -> latencyMs) from the modelHealth store.
+ *
+ * Entries are keyed `${connectionId}|${provider}/${model}` (see
+ * modelHealthRepo.js), so the provider/model prefix must be parsed out of each
+ * key. A model can have one entry per account; the lowest positive latency wins
+ * because it reflects the fastest healthy account.
+ *
  * Returns a Map for quick lookup during combo reordering.
  * Fail-open: returns null on any error.
  */
@@ -112,25 +118,42 @@ export async function fetchComboLatencies(modelStrs) {
     const { listModelHealth } = await import("../../src/lib/modelHealth/service.js");
     const all = await listModelHealth();
     if (!all || typeof all !== "object") return null;
-    
+
+    const byFull = new Map();
+    const byModel = new Map();
+    for (const [key, entry] of Object.entries(all)) {
+      if (!entry || typeof entry !== "object") continue;
+      const latency = entry.latencyMs;
+      if (typeof latency !== "number" || !Number.isFinite(latency) || latency <= 0) continue;
+
+      // `${connectionId}|${provider}/${model}` — provider/model may contain "/".
+      const sep = key.indexOf("|");
+      if (sep < 0) continue;
+      const rest = key.slice(sep + 1);
+      const slash = rest.indexOf("/");
+      if (slash <= 0) continue;
+      const fullKey = rest.toLowerCase();
+      const modelKey = rest.slice(slash + 1).toLowerCase();
+
+      const keepLowest = (map, mapKey) => {
+        const prev = map.get(mapKey);
+        if (!prev || latency < prev) map.set(mapKey, latency);
+      };
+      keepLowest(byFull, fullKey);
+      keepLowest(byModel, modelKey);
+    }
+
     const latencyMap = new Map();
-    const now = Date.now();
-    
     for (const modelStr of modelStrs) {
       if (typeof modelStr !== "string") continue;
-      const slashIdx = modelStr.indexOf("/");
+      const lower = modelStr.toLowerCase();
+      const slashIdx = lower.indexOf("/");
       if (slashIdx < 0) continue;
-      
-      const provider = modelStr.slice(0, slashIdx).toLowerCase();
-      const model = modelStr.slice(slashIdx + 1).toLowerCase();
-      const key = `${provider}|${model}`;
-      const entry = all[key] || all[provider]?.[model];
-      
-      if (entry?.latencyMs && typeof entry.latencyMs === "number") {
-        latencyMap.set(modelStr, entry.latencyMs);
-      }
+      const modelKey = lower.slice(slashIdx + 1);
+      const latency = byFull.get(lower) ?? byModel.get(modelKey);
+      if (typeof latency === "number") latencyMap.set(modelStr, latency);
     }
-    
+
     return latencyMap.size > 0 ? latencyMap : null;
   } catch {
     return null;

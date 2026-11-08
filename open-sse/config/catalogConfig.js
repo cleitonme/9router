@@ -104,6 +104,13 @@ export const FREE_ENDPOINT_MAX_PAGES = 5;
 // upstream failure never hides it forever.
 export const MODEL_BROKEN_RECHECK_MS = 24 * 60 * 60 * 1000;
 
+// Catalog availability validation. Providers whose /v1/models lists ids that
+// free keys cannot actually call (NVIDIA NIM being the motivating case) need a
+// real probe. Only ids without a known latency are probed, bounded per refresh
+// so a large catalogue never turns a refresh into a quota sink.
+export const CATALOG_VALIDATE_MAX_MODELS = 6;
+export const CATALOG_VALIDATE_CONCURRENCY = 3;
+
 // Build slugs and API ids disagree about separators ("glm-5-3-flash" vs
 // "glm-5.3-flash", "nemotron-3_5" vs "nemotron-3.5"), so both sides are
 // compared with separators stripped.

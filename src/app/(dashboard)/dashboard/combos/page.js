@@ -749,6 +749,29 @@ const fmtK = (n) => {
   return `${Math.round(n / 1000)}k`;
 };
 
+// After a full test run, show the fastest live model first so the fallback
+// order the user sees matches the measured reality. Dead/untested keep their
+// relative order at the end; Array#sort is stable.
+function sortModelsByTestResult(models, results, complete) {
+  if (!complete || !results) return models;
+  const rank = (model) => {
+    const result = results[model];
+    if (!result) return 2;
+    return result.ok ? 0 : 1;
+  };
+  const latency = (model) => {
+    const ms = results[model]?.latencyMs;
+    return typeof ms === "number" && ms > 0 ? ms : Infinity;
+  };
+  return [...models].sort((a, b) => {
+    const ra = rank(a);
+    const rb = rank(b);
+    if (ra !== rb) return ra - rb;
+    if (ra === 0) return latency(a) - latency(b);
+    return 0;
+  });
+}
+
 function ComboCard({
   combo,
   getCaps,
@@ -784,6 +807,11 @@ function ComboCard({
   // generic patterns and under-report the limits. getCaps carries the server's
   // answer for /api/models.
   const comboCaps = aggregateComboCapabilities(combo.models, comboByName, getCaps);
+  const displayModels = sortModelsByTestResult(
+    combo.models,
+    testData?.results,
+    Boolean(testData?.summary) && !isTesting,
+  );
 
   return (
     <Card padding="sm" className={`group ${selected ? "ring-1 ring-primary/40 bg-primary/[0.03]" : ""}`}>
@@ -812,10 +840,10 @@ function ComboCard({
               )}
             </div>
             <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
-              {combo.models.length === 0 ? (
+              {displayModels.length === 0 ? (
                 <span className="text-xs text-text-muted italic">No models</span>
               ) : (
-                (expandedModels ? combo.models : combo.models.slice(0, 3)).map((model, index) => {
+                (expandedModels ? displayModels : displayModels.slice(0, 3)).map((model, index) => {
                   const testRes = testData?.results?.[model];
                   let statusClasses = "bg-black/5 dark:bg-white/5 text-text-muted border-transparent";
                   if (testRes) {

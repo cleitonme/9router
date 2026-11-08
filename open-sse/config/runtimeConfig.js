@@ -63,6 +63,11 @@ export const EMPTY_STREAM_GATE_TIMEOUT_MS = envMs("EMPTY_STREAM_GATE_TIMEOUT_MS"
 // Fetch connect timeout: abort if upstream doesn't return response headers within this duration
 export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1000);
 
+// Chat model probe: wait only for the first streamed token (TTFT), not the whole
+// answer. Reasoning models can spend minutes thinking, so a full-response probe
+// produces false "dead" results. Env: MODEL_PROBE_TIMEOUT_MS.
+export const MODEL_PROBE_TIMEOUT_MS = envMs("MODEL_PROBE_TIMEOUT_MS", 20 * 1000);
+
 // Gemini native TTS fetch timeout: abort if Google does not return response headers in time.
 export const GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS = envMs("GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS", 45 * 1000);
 

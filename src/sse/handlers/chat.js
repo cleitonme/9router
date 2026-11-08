@@ -40,6 +40,36 @@ import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { blockGroq, isGroqTpmError, parseGroqResetsAtMs, GROQ_BLOCK_TTL_MS } from "open-sse/services/groqPreflight.js";
 
+// Durable per-model health is recorded on every routing outcome so the combo
+// latency sort and the managed/catalog auto-removal have real data. Fail-open:
+// a kv failure must never break routing.
+async function recordRoutingHealth({ connectionId, provider, model, ok, statusCode = null, reason = null, latencyMs = null, errorText = null }) {
+  try {
+    const { recordModelHealth } = await import("@/lib/modelHealth/service.js");
+    await recordModelHealth({
+      connectionId, provider, model, ok,
+      statusCode, reason,
+      scope: "model",
+      latencyMs,
+      errorText: typeof errorText === "string" ? errorText.slice(0, 300) : null,
+    });
+  } catch { /* fail-open */ }
+}
+
+// A client disconnect also surfaces as an abort. Only upstream timeouts should
+// count as model failures; 408/504 are upstream by definition.
+function isUpstreamTimeout(classificationType, status, errorText) {
+  if (classificationType !== "timeout") return false;
+  const text = String(errorText || "");
+  // Client disconnect / explicit abort: not the model's fault.
+  if (status === 499 || /aborted a request|user aborted|client abort/i.test(text)) return false;
+  if (status >= 500 || status === HTTP_STATUS.REQUEST_TIMEOUT) return true;
+  if (/timeout|timed out|etimedout|und_err_connect_timeout|aborted due to timeout/i.test(text)) return true;
+  // Unknown-status fetch abort that is not an explicit client abort.
+  if (!status) return !/abort/i.test(text);
+  return false;
+}
+
 /**
  * Apply smart-combo routing for one request.
  *
@@ -465,6 +495,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   let retryCount = 0;
   const reqId = clientRawRequest?.requestId || null;
 
+  // A timeout/5xx can be followed by a retry on another account. Record it as a
+  // model failure only if we end up leaving the model entirely, so a healthy
+  // account saving the request never adds a strike. One strike per request.
+  let pendingModelFailure = null;
+
   while (true) {
     // RAM gateway/provider blocks: skip without burning an upstream call so
     // the combo advances immediately (generalizes the old Groq-only bypass).
@@ -483,6 +518,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // All accounts unavailable → model unavailable → next model (combo advances).
     // Never loop on the same model once every account is locked/excluded.
     if (!credentials || credentials.allRateLimited) {
+      // No account can serve this model anymore. If the last real attempt was a
+      // timeout/5xx, this is the model's last strike (covers single-connection
+      // providers, where the retry lands here instead of the transient branch).
+      if (pendingModelFailure) {
+        await recordRoutingHealth({ ...pendingModelFailure, ok: false });
+        pendingModelFailure = null;
+      }
       if (credentials?.allRateLimited) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = HTTP_STATUS.SERVICE_UNAVAILABLE;
@@ -513,6 +555,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Use shared chatCore
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
+    const attemptStart = Date.now();
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },
@@ -560,7 +603,20 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Streaming started → success path already returned. Any failure here
     // happened BEFORE the first token, so fallback is safe (no tool can
     // have executed twice). Never auto-retry after streaming began.
-    if (result.success) return result.response;
+    if (result.success) {
+      // A success on any account clears the pending strike from an earlier
+      // account and resets this connection's consecutive-failure streak.
+      pendingModelFailure = null;
+      // Streaming returns at the first token, non-streaming after the full
+      // answer; both are a usable latency sample for fastest-first ordering.
+      // Fire-and-forget so the client's first token is never delayed by kv.
+      void recordRoutingHealth({
+        connectionId: credentials.connectionId,
+        provider, model, ok: true, statusCode: result.status || 200, reason: "ok",
+        latencyMs: Date.now() - attemptStart,
+      });
+      return result.response;
+    }
 
     // Classify once: drives lock scope, cooldown, logs and next action.
     let classification = result.classification || null;
@@ -725,6 +781,22 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Temporary overload — or an empty upstream success (200 with zero content):
     // max 1 backoff (1–5s + Retry-After) then next route.
     if (ctype === "upstream_overload" || ctype === "upstream_rate_limit" || ctype === "concurrency_limit" || ctype === "gateway_rate_limit" || ctype === "timeout" || ctype === "server_error" || ctype === "empty_response") {
+      // Timeouts/5xx are the model's fault; rate limits/overload are not.
+      // Client aborts also classify as timeout, so filter those out.
+      const countAsModelFailure =
+        ctype === "server_error" ||
+        ctype === "empty_response" ||
+        isUpstreamTimeout(ctype, result.status, result.error);
+      if (countAsModelFailure) {
+        pendingModelFailure = {
+          connectionId: credentials.connectionId,
+          provider, model,
+          statusCode: result.status || 0,
+          reason: ctype,
+          errorText: result.error,
+        };
+      }
+
       let delayMs = upstreamBackoffMs();
       try {
         const h = parseResetsAtMsFromHeaders(result.response?.headers);
@@ -742,6 +814,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, null, { bodyJson: result.bodyJson, headers: result.response?.headers });
         continue;
       }
+      // Committed to leaving this route: commit the strike too.
+      if (pendingModelFailure) {
+        await recordRoutingHealth({ ...pendingModelFailure, ok: false });
+        pendingModelFailure = null;
+      }
+
       log.warn("UPSTREAM", `${provider} upstream=${upstream || provider} model=${model} reason=${ctype} status=${result.status} action=next_route request_id=${reqId}`);
       await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, null, { bodyJson: result.bodyJson, headers: result.response?.headers });
       excludeConnectionIds.add(credentials.connectionId);

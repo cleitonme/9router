@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => ({
   refresh: vi.fn(),
   disabled: vi.fn(),
   filter: vi.fn(),
+  listHealth: vi.fn(),
+  recordHealth: vi.fn(),
+  ping: vi.fn(),
 }));
 
 vi.mock("@/lib/services/providerCatalog.js", () => ({
@@ -26,6 +29,12 @@ vi.mock("@/lib/db/repos/disabledModelsRepo.js", () => ({
 
 vi.mock("@/lib/modelHealth/service.js", () => ({
   filterComboCandidates: mocks.filter,
+  listModelHealth: mocks.listHealth,
+  recordModelHealth: mocks.recordHealth,
+}));
+
+vi.mock("@/app/api/models/test/ping.js", () => ({
+  pingModelByKind: mocks.ping,
 }));
 
 import { buildProviderCatalogComboModels } from "@/lib/services/providerCatalogCombo.js";
@@ -37,9 +46,12 @@ beforeEach(() => {
     models: candidates,
     skipped: [],
   }));
+  mocks.listHealth.mockReset().mockResolvedValue({});
+  mocks.recordHealth.mockReset().mockResolvedValue({});
+  mocks.ping.mockReset().mockResolvedValue({ ok: true, latencyMs: 100, status: 200 });
 });
 
-const baseConfig = { provider: "nvidia", refreshSchedule: "daily" };
+const baseConfig = { provider: "nvidia", refreshSchedule: "daily", validateModels: false };
 
 describe("buildProviderCatalogComboModels", () => {
   it("orders curated models first, appends new ids, and filters retired/disabled/non-chat", async () => {
@@ -143,5 +155,85 @@ describe("buildProviderCatalogComboModels", () => {
     expect(built.models).toEqual(["nvidia/static-a"]);
     expect(built.skipped).toHaveLength(1);
     expect(built.details).toHaveLength(1);
+  });
+
+  it("orders by measured latency fastest-first", async () => {
+    mocks.refresh.mockResolvedValue({
+      models: [{ id: "static-a" }, { id: "static-b" }, { id: "new-chat" }],
+      retired: [],
+      fetchedAt: "2026-11-03T00:00:00Z",
+    });
+    mocks.listHealth.mockResolvedValue({
+      "conn|nvidia/static-a": { latencyMs: 300, provider: "nvidia", model: "static-a" },
+      "conn|nvidia/static-b": { latencyMs: 120, provider: "nvidia", model: "static-b" },
+      "conn|nvidia/new-chat": { latencyMs: 50, provider: "nvidia", model: "new-chat" },
+    });
+
+    const built = await buildProviderCatalogComboModels({
+      ...baseConfig,
+      validateModels: true,
+    });
+
+    expect(built.models).toEqual([
+      "nvidia/new-chat",
+      "nvidia/static-b",
+      "nvidia/static-a",
+    ]);
+    expect(mocks.ping).not.toHaveBeenCalled();
+  });
+
+  it("probes only models without a measurement and drops probe failures", async () => {
+    mocks.refresh.mockResolvedValue({
+      models: [{ id: "static-a" }, { id: "static-b" }, { id: "new-chat" }],
+      retired: [],
+      fetchedAt: "2026-11-03T00:00:00Z",
+    });
+    mocks.listHealth.mockResolvedValue({
+      "conn|nvidia/static-a": { latencyMs: 300, provider: "nvidia", model: "static-a" },
+    });
+    mocks.ping.mockImplementation(async (candidate) => {
+      if (candidate === "nvidia/static-b") return { ok: true, latencyMs: 80, status: 200 };
+      return { ok: false, latencyMs: 20000, status: 0, error: "Probe timed out after 20000ms" };
+    });
+
+    const built = await buildProviderCatalogComboModels({
+      ...baseConfig,
+      validateModels: true,
+    });
+
+    expect(mocks.ping).toHaveBeenCalledTimes(2);
+    expect(mocks.ping).toHaveBeenCalledWith("nvidia/static-b", "llm");
+    expect(mocks.ping).toHaveBeenCalledWith("nvidia/new-chat", "llm");
+    expect(built.models).toEqual(["nvidia/static-b", "nvidia/static-a"]);
+    expect(built.skipped).toContainEqual({
+      model: "nvidia/new-chat",
+      reason: "catalog_validation_failed",
+      nextRetry: null,
+    });
+    expect(mocks.recordHealth).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "nvidia",
+        model: "new-chat",
+        ok: false,
+        reason: "timeout",
+      }),
+    );
+  });
+
+  it("keeps the list when every probe fails (upstream-wide outage)", async () => {
+    mocks.refresh.mockResolvedValue({
+      models: [{ id: "static-a" }, { id: "static-b" }],
+      retired: [],
+      fetchedAt: "2026-11-03T00:00:00Z",
+    });
+    mocks.ping.mockResolvedValue({ ok: false, status: 0, error: "fetch failed" });
+
+    const built = await buildProviderCatalogComboModels({
+      ...baseConfig,
+      validateModels: true,
+    });
+
+    expect(built.models).toEqual(["nvidia/static-a", "nvidia/static-b"]);
+    expect(built.warning).toBe("catalog_validation_all_failed");
   });
 });
