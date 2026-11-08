@@ -1,20 +1,29 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { Button, Input, Toggle, Badge, Card, Modal, ConfirmModal } from "@/shared/components";
+import { useState, useMemo } from "react";
+import { Button, Input, Toggle, Badge, Card, ConfirmModal } from "@/shared/components";
 import { useNotificationStore } from "@/store/notificationStore";
 
 function WebshareConfigCard({ settings, onUpdate, onSync }) {
-  const ws = settings?.webshareSync || {};
+  const ws = useMemo(() => settings?.webshareSync || {}, [settings?.webshareSync]);
   
-  const [apiKey, setApiKey] = useState(ws.apiKey || "");
-  const [mode, setMode] = useState(ws.mode || "direct");
-  const [pageSize, setPageSize] = useState(String(ws.pageSize || 100));
-  const [planId, setPlanId] = useState(ws.planId || "");
-  const [autoReplace, setAutoReplace] = useState(ws.autoReplaceOnWebshare !== false);
-  const [removeDead, setRemoveDead] = useState(ws.removeDeadFrom9Router !== false);
-  const [autoSync, setAutoSync] = useState(ws.autoSync || false);
-  const [syncInterval, setSyncInterval] = useState(String(ws.syncIntervalMinutes || 60));
+  const displayApiKey = ws.apiKey || "";
+  const displayMode = ws.mode || "direct";
+  const displayPageSize = ws.pageSize || 100;
+  const displayPlanId = ws.planId || "";
+  const displayAutoReplace = ws.autoReplaceOnWebshare !== false;
+  const displayRemoveDead = ws.removeDeadFrom9Router !== false;
+  const displayAutoSync = ws.autoSync || false;
+  const displaySyncInterval = ws.syncIntervalMinutes || 60;
+
+  const [apiKey, setApiKey] = useState(displayApiKey);
+  const [mode, setMode] = useState(displayMode);
+  const [pageSize, setPageSize] = useState(String(displayPageSize));
+  const [planId, setPlanId] = useState(displayPlanId);
+  const [autoReplace, setAutoReplace] = useState(displayAutoReplace);
+  const [removeDead, setRemoveDead] = useState(displayRemoveDead);
+  const [autoSync, setAutoSync] = useState(displayAutoSync);
+  const [syncInterval, setSyncInterval] = useState(String(displaySyncInterval));
 
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -88,7 +97,7 @@ function WebshareConfigCard({ settings, onUpdate, onSync }) {
   };
 
   const stats = ws.stats || {};
-  const hasAutoSync = autoSync || ws.autoSync;
+  const hasAutoSync = ws.autoSync || false;
 
   return (
     <>
@@ -99,7 +108,7 @@ function WebshareConfigCard({ settings, onUpdate, onSync }) {
             Webshare Integration
           </h3>
           {hasAutoSync && (
-            <Badge variant="success" size="sm">Auto-sync: {syncInterval}m</Badge>
+            <Badge variant="success" size="sm">Auto-sync: {displaySyncInterval}m</Badge>
           )}
         </div>
 
@@ -187,7 +196,7 @@ function WebshareConfigCard({ settings, onUpdate, onSync }) {
           <label className="flex items-center gap-2 cursor-pointer">
             <Toggle checked={hasAutoSync} onChange={(e) => {
               setAutoSync(e.target.checked);
-              setSyncInterval(e.target.checked ? syncInterval : "60");
+              if (!e.target.checked) setSyncInterval("60");
             }} />
             <span className="text-sm">Habilitar sync automático</span>
           </label>

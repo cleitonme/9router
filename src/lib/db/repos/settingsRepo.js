@@ -142,6 +142,18 @@ export async function getSettings() {
   return mergeWithDefaults(raw);
 }
 
+function deepMerge(target, source) {
+  const result = { ...target };
+  for (const [key, value] of Object.entries(source)) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      result[key] = deepMerge(result[key] || {}, value);
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
 // Atomic read-merge-write inside transaction (prevents losing concurrent updates)
 export async function updateSettings(updates) {
   const db = await getAdapter();
@@ -149,7 +161,7 @@ export async function updateSettings(updates) {
   db.transaction(function () {
     const row = db.get(`SELECT data FROM settings WHERE id = 1`);
     const current = row ? parseJson(row.data, {}) : {};
-    next = { ...current, ...updates };
+    next = deepMerge(current, updates);
     db.run(
       `INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`,
       [stringifyJson(next)],

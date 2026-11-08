@@ -51,14 +51,16 @@ export async function POST(request) {
     }
 
     const updates = {
-      "webshareSync.apiKey": config.apiKey,
-      "webshareSync.mode": config.mode,
-      "webshareSync.pageSize": config.pageSize,
-      "webshareSync.planId": config.planId,
-      "webshareSync.autoReplaceOnWebshare": config.autoReplaceOnWebshare,
-      "webshareSync.removeDeadFrom9Router": config.removeDeadFrom9Router,
-      "webshareSync.autoSync": config.autoSync,
-      "webshareSync.syncIntervalMinutes": config.syncIntervalMinutes,
+      webshareSync: {
+        apiKey: config.apiKey,
+        mode: config.mode,
+        pageSize: config.pageSize,
+        planId: config.planId,
+        autoReplaceOnWebshare: config.autoReplaceOnWebshare,
+        removeDeadFrom9Router: config.removeDeadFrom9Router,
+        autoSync: config.autoSync,
+        syncIntervalMinutes: config.syncIntervalMinutes,
+      },
     };
 
     const settings = await updateSettings(updates);
@@ -89,18 +91,22 @@ export async function PATCH(request) {
 
     const updates = {};
     if (typeof body.apiKey === "string" && body.apiKey.trim()) {
-      updates["webshareSync.apiKey"] = config.apiKey;
+      updates.apiKey = config.apiKey;
     }
-    if (body.autoSync !== undefined) updates["webshareSync.autoSync"] = config.autoSync;
+    if (body.autoSync !== undefined) {
+      updates.autoSync = config.autoSync;
+    }
     if (body.syncIntervalMinutes !== undefined) {
-      updates["webshareSync.syncIntervalMinutes"] = config.syncIntervalMinutes;
+      updates.syncIntervalMinutes = config.syncIntervalMinutes;
     }
 
     if (Object.keys(updates).length === 0) {
       return NextResponse.json({ error: "No valid updates provided" }, { status: 400 });
     }
 
-    const settings = await updateSettings(updates);
+    const settings = await updateSettings({
+      webshareSync: updates,
+    });
 
     if (config.autoSync && config.apiKey) {
       startWebshareSyncScheduler();

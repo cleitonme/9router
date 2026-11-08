@@ -53,14 +53,17 @@ export async function syncWebsharePools(options = {}) {
     const durationMs = endTime - startTime;
 
     const now = new Date().toISOString();
+    const prevSyncCount = config.stats?.syncCount || 0;
     await updateSettings({
-      "webshareSync.lastSyncAt": now,
-      "webshareSync.syncCount": (config.syncCount || 0) + 1,
-      "webshareSync.syncDurationMs": durationMs,
-      "webshareSync.lastSyncResult": {
-        ...result,
-        completedAt: now,
-        durationMs,
+      webshareSync: {
+        lastSyncAt: now,
+        syncCount: prevSyncCount + 1,
+        syncDurationMs: durationMs,
+        lastSyncResult: {
+          ...result,
+          completedAt: now,
+          durationMs,
+        },
       },
     });
 
