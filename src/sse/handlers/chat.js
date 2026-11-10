@@ -364,6 +364,7 @@ export async function handleChat(request, clientRawRequest = null) {
       comboName: modelStr,
       comboStrategy: effectiveStrategy,
       comboStickyLimit,
+      latencySort: comboStrategies[modelStr]?.latencySort === true,
       onModelFailure: stickyModel
         ? (failedModel) => {
             if (failedModel === stickyModel) clearStickySession(modelStr, stickySessionId);
@@ -466,6 +467,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         comboName: modelStr,
         comboStrategy: effectiveStrategy,
         comboStickyLimit,
+        latencySort: comboStrategies[modelStr]?.latencySort === true,
         onModelFailure: stickyModel
           ? (failedModel) => {
               if (failedModel === stickyModel) clearStickySession(modelStr, stickySessionId);

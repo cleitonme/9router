@@ -167,8 +167,11 @@ export default function ComboDetailPage() {
     const settingsRes = await fetch("/api/settings", { cache: "no-store" });
     const s = settingsRes.ok ? await settingsRes.json() : {};
     const updated = { ...(s.comboStrategies || {}) };
-    if (enabled) updated[combo.name] = { fallbackStrategy: "round-robin" };
-    else delete updated[combo.name];
+    const next = { ...(updated[combo.name] || {}) };
+    if (enabled) next.fallbackStrategy = "round-robin";
+    else delete next.fallbackStrategy;
+    if (Object.keys(next).length === 0) delete updated[combo.name];
+    else updated[combo.name] = next;
     await fetch("/api/settings", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },

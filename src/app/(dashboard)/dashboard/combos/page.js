@@ -431,14 +431,21 @@ export default function CombosPage() {
     });
   };
 
-  // Merge a per-combo strategy patch into settings.comboStrategies. Passing an empty
-  // patch (strategy back to default "fallback") drops the entry entirely.
+  // Merge a per-combo strategy patch into settings.comboStrategies. Drop default/
+  // cleared keys, but keep the entry whenever any opt-in extra (e.g. latencySort)
+  // is still set — otherwise a default-fallback combo would lose its config.
   const handleSetComboStrategy = async (comboName, patch) => {
     try {
       const updated = { ...comboStrategies };
       const next = { ...(updated[comboName] || {}), ...patch };
+      if (Object.prototype.hasOwnProperty.call(patch, "latencySort") && !patch.latencySort) {
+        delete next.latencySort;
+      }
       // Prune to keep settings clean: default fallback with no extras = no entry.
       if (!next.fallbackStrategy || next.fallbackStrategy === "fallback") {
+        delete next.fallbackStrategy;
+      }
+      if (Object.keys(next).length === 0) {
         delete updated[comboName];
       } else {
         updated[comboName] = next;
@@ -456,13 +463,16 @@ export default function CombosPage() {
     try {
       const updated = { ...comboStrategies };
       for (const combo of selectedCombos) {
+        const next = { ...(updated[combo.name] || {}) };
         if (!strategy || strategy === "fallback") {
+          delete next.fallbackStrategy;
+        } else {
+          next.fallbackStrategy = strategy;
+        }
+        if (Object.keys(next).length === 0) {
           delete updated[combo.name];
         } else {
-          updated[combo.name] = {
-            ...(updated[combo.name] || {}),
-            fallbackStrategy: strategy,
-          };
+          updated[combo.name] = next;
         }
       }
       await persistComboStrategies(updated);
@@ -497,6 +507,9 @@ export default function CombosPage() {
             <li><span className="font-medium text-text-main">Fusion</span> — queries all models in parallel, then a judge synthesizes one answer. Best quality, but costs the most: every request bills all panel models + the judge (N+1 calls)</li>
             <li><span className="font-medium text-text-main">Smart</span> — uses a System One classifier to pick the lead model by task complexity, then falls back normally. Session policies (Smart Switch, Strict Lock, Per-Turn, Custom) keep the model stable across turns to retain prompt cache</li>
           </ul>
+          <p className="text-xs text-text-muted mt-2">
+            <span className="font-medium text-text-main">Sort by latency</span> is opt-in per combo. Leave it off to always try models in the exact order you registered.
+          </p>
           <p className="hidden text-xs text-text-muted mt-3 max-w-2xl">
             <span className="font-medium text-text-main">Cursor / Claude Default</span> create combos named exactly like those clients&apos; model IDs (e.g. <code className="font-mono">composer-2.5</code>, <code className="font-mono">opus</code>), seeded with the matching <code className="font-mono">cu/…</code> or <code className="font-mono">cc/…</code> route so traffic can hit 9router without the prefix.
             {" "}Note: Cursor IDE itself often blocks built-in Composer / Grok from Override OpenAI Base URL (&quot;model does not support custom API&quot;); add them via Cursor&apos;s <span className="font-medium text-text-main">Add Custom Model</span> using the combo name, or pick a model Cursor allows through the custom endpoint.
@@ -919,6 +932,20 @@ function ComboCard({
                 <span>max {fmtK(comboCaps.maxOutput)}</span>
               </div>
             )}
+            {/* Latency ordering is opt-in: off keeps the registered model order */}
+            <div className="mt-2 flex items-center gap-1.5">
+              <Toggle
+                checked={strategy.latencySort === true}
+                onChange={(v) => onSetStrategy({ latencySort: v })}
+                aria-label={`Sort ${combo.name} by latency`}
+              />
+              <span
+                className="text-[11px] font-medium text-text-muted"
+                title="When on, models are tried fastest-first using measured latency. Off keeps the order you registered."
+              >
+                Sort by latency
+              </span>
+            </div>
             {intelligence && (
               <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-text-muted">
                 <span className="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 font-medium text-primary">

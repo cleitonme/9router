@@ -103,7 +103,8 @@ export async function handleFetch(request) {
       log,
       comboName: providerInput,
       comboStrategy,
-      comboStickyLimit
+      comboStickyLimit,
+      latencySort: comboStrategies[providerInput]?.latencySort === true,
     });
   }
 

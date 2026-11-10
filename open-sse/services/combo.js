@@ -451,26 +451,28 @@ export function isZeroContentResponse(data) {
  * @param {string} [options.comboName] - Name of the combo (for round-robin tracking)
  * @param {string} [options.comboStrategy] - Strategy: "fallback" or "round-robin"
  * @param {number|string} [options.comboStickyLimit=1] - Requests per combo model before switching
+ * @param {boolean} [options.latencySort=false] - Opt-in: reorder models by measured latency
  * @param {Function} [options.onModelFailure] - Called with the model string when a candidate fails
  * @returns {Promise<Response>}
  */
-export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true, onModelFailure = null }) {
+export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true, latencySort = false, onModelFailure = null }) {
   // Apply rotation strategy if enabled
   let rotatedModels = getRotatedModels(models, comboName, comboStrategy, comboStickyLimit);
 
-  // Auto-switch: float models that satisfy the request's required capabilities to the front,
-  // then sort by latency (faster models higher in the chain).
+  // Auto-switch: float models that satisfy the request's required capabilities to the front.
+  // Latency sorting is opt-in per combo; without it the registered order is preserved.
   if (autoSwitch) {
     const required = detectRequiredCapabilities(body);
-    
-    // Fetch latency map for all models
+
     let latencyMap = null;
-    try {
-      latencyMap = await fetchComboLatencies(rotatedModels);
-    } catch {
-      // fail-open
+    if (latencySort) {
+      try {
+        latencyMap = await fetchComboLatencies(rotatedModels);
+      } catch {
+        // fail-open
+      }
     }
-    
+
     if (required.size > 0) {
       const reordered = reorderByCapabilities(rotatedModels, required, latencyMap);
       if (reordered[0] !== rotatedModels[0]) {
@@ -478,7 +480,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       }
       rotatedModels = reordered;
     } else if (latencyMap && latencyMap.size > 0 && rotatedModels.length > 1) {
-      // No capability requirements - just sort by latency
+      // No capability requirements - just sort by latency (opt-in only).
       const reordered = [...rotatedModels].sort((a, b) => {
         const la = latencyMap.get(a) ?? Infinity;
         const lb = latencyMap.get(b) ?? Infinity;

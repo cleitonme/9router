@@ -1,7 +1,61 @@
-import { describe, expect, it } from "vitest";
-import { reorderByCapabilities } from "../../open-sse/services/combo.js";
+import { describe, expect, it, vi } from "vitest";
+import { handleComboChat, reorderByCapabilities } from "../../open-sse/services/combo.js";
+
+const healthMock = vi.hoisted(() => ({
+  entries: {
+    "conn-a|nvidia/model-a": { latencyMs: 800 },
+    "conn-b|nvidia/model-b": { latencyMs: 200 },
+    "conn-c|nvidia/model-c": { latencyMs: 500 },
+  },
+}));
+
+vi.mock("../../src/lib/modelHealth/service.js", () => ({
+  listModelHealth: async () => healthMock.entries,
+  recordModelHealth: async () => {},
+}));
+
+const MODELS = ["nvidia/model-a", "nvidia/model-b", "nvidia/model-c"];
+
+async function runCombo({ latencySort }) {
+  const tried = [];
+  const response = await handleComboChat({
+    body: { messages: [{ role: "user", content: "hi" }] },
+    models: MODELS,
+    handleSingleModel: async (_body, model) => {
+      tried.push(model);
+      return new Response(
+        JSON.stringify({ choices: [{ message: { role: "assistant", content: "ok" } }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+    log: { info: () => {}, warn: () => {} },
+    comboName: "test-combo",
+    comboStrategy: "fallback",
+    latencySort,
+  });
+  return { tried, response };
+}
 
 describe("combo latency optimization", () => {
+  describe("handleComboChat latency sort opt-in", () => {
+    it("keeps the registered order when latencySort is off", async () => {
+      const { tried, response } = await runCombo({ latencySort: false });
+      expect(response.ok).toBe(true);
+      expect(tried[0]).toBe("nvidia/model-a");
+    });
+
+    it("keeps the registered order when latencySort is omitted", async () => {
+      const { tried } = await runCombo({ latencySort: undefined });
+      expect(tried[0]).toBe("nvidia/model-a");
+    });
+
+    it("tries the fastest model first when latencySort is on", async () => {
+      const { tried, response } = await runCombo({ latencySort: true });
+      expect(response.ok).toBe(true);
+      expect(tried[0]).toBe("nvidia/model-b");
+    });
+  });
+
   describe("reorderByCapabilities with latency", () => {
     it("sorts by latency within same tier when latencyMap provided and required set", () => {
       const models = [
