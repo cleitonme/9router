@@ -20,6 +20,12 @@
   transport: {
     baseUrl: "https://integrate.api.nvidia.com/v1/chat/completions",
     validateUrl: "https://integrate.api.nvidia.com/v1/models",
+    // NIM's cluster discovery can exceed the 60s default connect budget on a
+    // cold/degraded gateway; cap it at 90s instead of failing the request.
+    timeoutMs: 90000,
+    quirks: {
+      dropClientMetadata: true,
+    },
   },
   // Authenticated live catalog. Read by src/lib/services/providerCatalog.js to
   // keep /v1/models and provider-catalog combos in sync with upstream (new ids

@@ -709,6 +709,7 @@
   "nvidia": {
     "baseUrl": "https://integrate.api.nvidia.com/v1/chat/completions",
     "validateUrl": "https://integrate.api.nvidia.com/v1/models",
+    "timeoutMs": 90000,
     "format": "openai"
   },
   "ollama-local": {

@@ -28,6 +28,7 @@
 - **Provider-catalog combos**: order models fastest-first from measured latency, probe only ids without a measurement on refresh (≤6 models, 3 concurrent), drop probed-dead ids unless all fail, persist the order, and sort dashboard/provider test results fastest-first
 - **Server**: raise the idle HTTP keep-alive timeout to 65s by default in `custom-server.js` (override with `KEEP_ALIVE_TIMEOUT` in ms, `0` disables it) so pooled client/proxy connections stop being dropped after Node's 5s default; an explicit `keepAliveTimeout` server option still wins (#5264)
 - **NVIDIA NIM**: normalize assistant `reasoning` aliases to `reasoning_content` before forwarding, avoiding NIM's duplicate-field 400 when clients send both.
+- **NVIDIA NIM**: strip the params NIM answers 400 for (`client_metadata`, `prompt_cache_key`, `service_tier`, `anthropic_beta`, `thinking_budget`, `user_id`, `custom_field`), enable the `dropClientMetadata` quirk, cap the connect timeout at 90s, and treat its "degraded" cluster error as a 15m model-scoped cooldown that does not park the API key
 
 # v0.5.95 (2026-10-01)
 

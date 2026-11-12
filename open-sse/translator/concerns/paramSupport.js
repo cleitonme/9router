@@ -32,8 +32,22 @@ const STRIP_RULES = [
   { provider: "cerebras", dropMessageFields: ["reasoning_content", "reasoning", "reasoning_details"] },
   // NVIDIA NIM treats `reasoning` and `reasoning_content` as aliases for one
   // field; sending both makes its deserializer report a duplicate field. Keep
-  // the OpenAI canonical spelling on assistant history.
-  { provider: "nvidia", renameMessageFields: { reasoning: "reasoning_content" } },
+  // the OpenAI canonical spelling on assistant history. NIM also rejects
+  // unmatched client metadata, Anthropic beta flags, thinking budget and OpenAI
+  // extra params with 400, so strip them before forwarding.
+  {
+    provider: "nvidia",
+    drop: [
+      "client_metadata",
+      "prompt_cache_key",
+      "service_tier",
+      "anthropic_beta",
+      "thinking_budget",
+      "user_id",
+      "custom_field",
+    ],
+    renameMessageFields: { reasoning: "reasoning_content" },
+  },
   // Current OpenAI models (gpt-5.x / gpt-6.x) reject `max_tokens` with HTTP 400
   // ("Use 'max_completion_tokens' instead"). Clients send `max_tokens`, so rename it.
   { provider: "openai", renameParams: { max_tokens: "max_completion_tokens" } },
