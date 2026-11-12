@@ -40,6 +40,34 @@ describe("DB SQLite layer — public API parity", () => {
     expect(re.customField).toBe("x");
   });
 
+  it("settings: whole-map keys replace instead of deep-merging", async () => {
+    await sqliteDb.updateSettings({
+      comboStrategies: {
+        alpha: { fallbackStrategy: "smart", latencySort: true },
+        beta: { fallbackStrategy: "round-robin" },
+      },
+      providerStrategies: { nvidia: { fallbackStrategy: "round-robin" } },
+      quotaVisibility: { nvidia: { hidden: ["q1"] } },
+    });
+
+    // Dropping a nested key and a whole entry must persist (deepMerge would keep both).
+    await sqliteDb.updateSettings({
+      comboStrategies: { alpha: { fallbackStrategy: "smart" } },
+      providerStrategies: {},
+      quotaVisibility: { nvidia: {} },
+    });
+    let s = await sqliteDb.getSettings();
+    expect(s.comboStrategies.alpha).toEqual({ fallbackStrategy: "smart" });
+    expect(s.comboStrategies.beta).toBeUndefined();
+    expect(s.providerStrategies).toEqual({});
+    expect(s.quotaVisibility.nvidia).toEqual({});
+
+    // Empty map clears everything.
+    await sqliteDb.updateSettings({ comboStrategies: {} });
+    s = await sqliteDb.getSettings();
+    expect(s.comboStrategies).toEqual({});
+  });
+
   it("isCloudEnabled reflects settings", async () => {
     await sqliteDb.updateSettings({ cloudEnabled: true });
     expect(await sqliteDb.isCloudEnabled()).toBe(true);

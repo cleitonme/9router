@@ -154,6 +154,11 @@ function deepMerge(target, source) {
   return result;
 }
 
+// Map-shaped settings that the dashboard always writes whole (read map → mutate →
+// PATCH full map). deepMerge cannot delete keys, so these must be replaced
+// outright or removed entries (e.g. a disabled per-combo flag) come back on reload.
+const WHOLE_MAP_KEYS = ["comboStrategies", "providerStrategies", "quotaVisibility"];
+
 // Atomic read-merge-write inside transaction (prevents losing concurrent updates)
 export async function updateSettings(updates) {
   const db = await getAdapter();
@@ -162,6 +167,12 @@ export async function updateSettings(updates) {
     const row = db.get(`SELECT data FROM settings WHERE id = 1`);
     const current = row ? parseJson(row.data, {}) : {};
     next = deepMerge(current, updates);
+    for (const key of WHOLE_MAP_KEYS) {
+      if (updates && Object.prototype.hasOwnProperty.call(updates, key)) {
+        const value = updates[key];
+        next[key] = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+      }
+    }
     db.run(
       `INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`,
       [stringifyJson(next)],
