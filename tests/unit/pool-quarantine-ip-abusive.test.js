@@ -181,6 +181,16 @@ describe("getProviderCredentials — quarantine-aware routing", () => {
     expect(new Date(credits.retryAfter).getTime() - Date.now()).toBeGreaterThan(IP_ABUSIVE_COOLDOWN_MS - 60_000);
   });
 
+  it("reports the no-auth lane as unavailable once it was already excluded", async () => {
+    poolsById.clear();
+    resetPoolQuarantineCache();
+    // The free lane has a single synthetic connection: re-selecting it after a
+    // failure is what produced the infinite retry loop. It must report
+    // allRateLimited instead of handing the same "noauth" identity back.
+    const credits = await getProviderCredentials("opencode", new Set(["noauth"]));
+    expect(credits?.allRateLimited).toBe(true);
+  });
+
   it("noAuth rotation never picks a quarantined pool", async () => {
     poolsById.clear();
     resetPoolQuarantineCache();

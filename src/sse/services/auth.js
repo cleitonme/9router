@@ -47,6 +47,18 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
     // Inject a virtual connection for no-auth free providers (with optional proxy pool from settings)
     if (FREE_PROVIDERS[providerId]?.noAuth) {
+      // A no-auth lane has a single synthetic identity: once it was attempted and
+      // excluded for this request there is no other account to rotate to. Report
+      // it as unavailable so the caller stops instead of re-selecting it forever.
+      if (excludeSet.has("noauth")) {
+        return {
+          allRateLimited: true,
+          retryAfter: new Date().toISOString(),
+          retryAfterHuman: "now",
+          lastError: "no-auth lane already attempted for this request",
+          lastErrorCode: null,
+        };
+      }
       const settings = await getSettings();
       const override = (settings.providerStrategies || {})[providerId] || {};
       const strategy = override.rotateStrategy || "none";

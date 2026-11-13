@@ -502,7 +502,17 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   // account saving the request never adds a strike. One strike per request.
   let pendingModelFailure = null;
 
+  // Hard ceiling: no legitimate fallback ladder needs this many attempts. It
+  // exists so a provider whose credential lookup cannot honor exclusions can
+  // never turn the retry loop into an unbounded request storm.
+  const MAX_ROUTING_ATTEMPTS = 200;
+  let routingAttempts = 0;
+
   while (true) {
+    if (++routingAttempts > MAX_ROUTING_ATTEMPTS) {
+      log.warn("CHAT", `${provider} model=${model} reason=routing_attempt_cap attempts=${routingAttempts} action=abort request_id=${reqId}`);
+      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "Routing attempt limit reached", lastHeaders);
+    }
     // RAM gateway/provider blocks: skip without burning an upstream call so
     // the combo advances immediately (generalizes the old Groq-only bypass).
     const gwBlock = isGatewayBlocked(provider);
@@ -617,6 +627,15 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         provider, model, ok: true, statusCode: result.status || 200, reason: "ok",
         latencyMs: Date.now() - attemptStart,
       });
+      return result.response;
+    }
+
+    // No-auth/free lane: there is no account to rotate to (getProviderCredentials
+    // always returns the synthetic "Public" connection) and markAccountUnavailable
+    // is a no-op for it. Continuing here would re-select the same lane forever, so
+    // hand the upstream error back and let the combo advance to the next model.
+    if (!credentials.connectionId) {
+      log.warn("CHAT", `${provider} model=${model} reason=noauth_no_fallback status=${result.status} action=next_model request_id=${reqId}`);
       return result.response;
     }
 
@@ -759,6 +778,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       } catch { /* ignore */ }
       if (!preciseMs && result.resetsAtMs && result.resetsAtMs > Date.now()) preciseMs = result.resetsAtMs;
       const r = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, preciseMs, { bodyJson: result.bodyJson, headers: result.response?.headers });
+      // Nothing to lock/rotate (no-auth lane): return the quota error so the combo
+      // advances instead of spinning on the same synthetic connection.
+      if (!r?.shouldFallback) {
+        log.warn("QUOTA", `${provider} model=${model} account=${account} reason=daily_limit_reached status=${result.status} action=next_model request_id=${reqId}`);
+        return result.response;
+      }
       const cd = r?.cooldownMs ? Math.round(r.cooldownMs / 1000) : "?";
       log.warn("QUOTA", `${provider} model=${model} account=${account} reason=daily_limit_reached status=${result.status} action=skip_account cooldown=${cd}s action=next_model request_id=${reqId}`);
       excludeConnectionIds.add(credentials.connectionId);

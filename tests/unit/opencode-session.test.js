@@ -14,6 +14,7 @@ import {
   generateSessionId,
   translateSessionId,
   stableSessionId,
+  forgetOpencodeSession,
   generateProjectId,
   generateRequestId,
 } from "../../open-sse/executors/opencode.js";
@@ -370,6 +371,28 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
     const second = executor.buildHeaders({})["x-opencode-session"];
     expect(first).toMatch(OPENCODE_SESSION_RE);
     expect(second).toBe(first);
+  });
+
+  it("forgets a spent stable session so the next request mints a fresh one", () => {
+    const creds = { connectionId: "forget-stable-conn", rawHeaders: {} };
+    const spent = stableSessionId(creds);
+    expect(stableSessionId(creds)).toBe(spent);
+
+    expect(forgetOpencodeSession(spent)).toBe(true);
+    const fresh = stableSessionId(creds);
+    expect(fresh).toMatch(OPENCODE_SESSION_RE);
+    expect(fresh).not.toBe(spent);
+  });
+
+  it("forgets a spent translated session as well", () => {
+    const clientSession = "conversation-forget-translated";
+    const spent = translateSessionId(clientSession, "claude");
+    expect(translateSessionId(clientSession, "claude")).toBe(spent);
+
+    expect(forgetOpencodeSession(spent)).toBe(true);
+    const fresh = translateSessionId(clientSession, "claude");
+    expect(fresh).toMatch(OPENCODE_SESSION_RE);
+    expect(fresh).not.toBe(spent);
   });
 
   it("applies the read/shell free-tier fingerprint on Chat Completions", () => {

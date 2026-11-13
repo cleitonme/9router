@@ -25,6 +25,43 @@ const OPENCODE_CLIENT = "cli";
 const OPENCODE_LEGACY_UA = "opencode/dev/0.0.0-dev-202610272228/opencode";
 const OPENCODE_LEGACY_CLIENT = "opencode";
 
+// Free-lane load shedding: total attempts (first try + retries) and backoff.
+// Live bursts last ~20 s (a request that kept failing for 8 s succeeded at 19 s),
+// so the schedule below covers 800+1600+2400+3200+4000*3 = ~20 s.
+const OPENCODE_OVERLOAD_ATTEMPTS = 8;
+const OPENCODE_OVERLOAD_BASE_MS = 800;
+const OPENCODE_OVERLOAD_MAX_MS = 4000;
+const OPENCODE_OVERLOAD_RE = /overloaded/i;
+
+/**
+ * Classify a gated free-lane rejection:
+ * - "overload": transient 429 load shedding, worth retrying.
+ * - "session":  any other 429 (FreeUsageLimitError) or 403, which can mean the
+ *               session id itself is spent or flagged.
+ * - null:       anything else.
+ */
+async function classifyRejection(response) {
+  const status = response?.status;
+  if (status !== 429 && status !== 403) return null;
+  if (status === 403) return "session";
+  try {
+    // The body is the response stream; clone it so a non-retryable 429 is still
+    // delivered intact to the caller.
+    return OPENCODE_OVERLOAD_RE.test(await response.clone().text()) ? "overload" : "session";
+  } catch {
+    return "session";
+  }
+}
+
+function sleep(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const onAbort = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => { signal?.removeEventListener?.("abort", onAbort); resolve(); }, ms);
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
+}
+
 const BOOT_PROJECT_ID = crypto.randomBytes(20).toString("hex");
 
 // 40-hex project id generator: mirrors the real CLI which derives it
@@ -208,6 +245,25 @@ export function stableSessionId(credentials) {
   }
   stableOpencodeSessions.set(key, { sessionId, lastUsed: Date.now() });
   return sessionId;
+}
+
+// The memoized sessions above are never refreshed on failure, so once upstream
+// spends or flags one, every later request reuses it and fails the same way
+// until restart (#5559). Drop the rejected id so the next request mints a fresh
+// one. Match by value, not identity key: a concurrent request may already have
+// minted a replacement, which must survive.
+export function forgetOpencodeSession(sessionId) {
+  if (!sessionId) return false;
+  let removed = false;
+  for (const store of [stableOpencodeSessions, translatedOpencodeSessions]) {
+    for (const [key, entry] of store) {
+      if (entry.sessionId === sessionId) {
+        store.delete(key);
+        removed = true;
+      }
+    }
+  }
+  return removed;
 }
 
 function bodyHasSessionHints(body) {
@@ -478,7 +534,7 @@ export class OpenCodeExecutor extends BaseExecutor {
       }
       providerOverrides = { ...providerOverrides, headers: sanitized };
     }
-    return super.execute({
+    const run = () => super.execute({
       ...args,
       providerOverrides,
       credentials,
@@ -498,6 +554,35 @@ export class OpenCodeExecutor extends BaseExecutor {
       },
       directFetchProxy: true,
     });
+
+    // The free lane sheds load with 429 "The inference service is overloaded"
+    // even after the request passes the TLS gate. Mirror the CLI: retry only
+    // that transient case with backoff. Any other 429/403 can mean the minted
+    // session is spent, so drop it for the next request and return intact.
+    for (let attempt = 1; ; attempt++) {
+      const result = await run();
+      const rejection = await classifyRejection(result?.response);
+      if (rejection === "session") {
+        // A client-supplied native session is not ours to replace; this only
+        // drops ids we minted, so the next request starts on a fresh one.
+        if (forgetOpencodeSession(credentials[SESSION_FIELD])) {
+          args.log?.debug?.("SESSION", `OpenCode ${result.response.status}: dropped cached session, next request re-mints`);
+        }
+        return result;
+      }
+      // A disconnected client should not keep the retry loop (and the free lane)
+      // busy for another ~20 s.
+      if (rejection !== "overload" || attempt >= OPENCODE_OVERLOAD_ATTEMPTS || args.signal?.aborted) {
+        return result;
+      }
+      // Release the discarded 429 instead of leaving its stream half-read.
+      try { await result.response.body?.cancel?.(); } catch { /* noop */ }
+      args.log?.debug?.("RETRY", `OpenCode free lane overloaded, retry ${attempt}/${OPENCODE_OVERLOAD_ATTEMPTS - 1}`);
+      const backoff = Math.min(OPENCODE_OVERLOAD_BASE_MS * attempt, OPENCODE_OVERLOAD_MAX_MS);
+      await sleep(backoff + Math.random() * 250, args.signal);
+      // Aborted mid-backoff: surface it the way a disconnect during the fetch does.
+      if (args.signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
+    }
   }
 
   // Free tier moved from /zen/v1 to /inference/v1 (OpenCode v2); /zen/v1 now

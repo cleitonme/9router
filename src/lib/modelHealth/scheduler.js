@@ -25,9 +25,15 @@ async function tick() {
     }
     const { getAllModelHealth } = await import("@/lib/db/index.js");
     const all = (await getAllModelHealth().catch(() => ({}))) || {};
+    const { resolveProviderId, FREE_PROVIDERS } = await import("@/shared/constants/providers.js");
+    // Re-probing a no-auth/free lane spends its shared quota and cannot recover
+    // it by rotating accounts. Leave those to live traffic; only paid/account
+    // routes are re-verified in the background.
+    const isFreeNoAuth = (provider) => !!FREE_PROVIDERS[resolveProviderId(provider)]?.noAuth;
     const now = Date.now();
     const due = Object.values(all).filter(
       (e) => e && typeof e === "object" && e.status !== "active" && e.provider && e.model && e.model !== "__all"
+        && !isFreeNoAuth(e.provider)
         && (!e.nextRetry || new Date(e.nextRetry).getTime() <= now),
     );
     // Permanent errors are rare by construction (nextRetry 7d); still cap.
