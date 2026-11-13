@@ -29,7 +29,7 @@ export async function POST(request) {
       );
     }
 
-    const { username, password } = await request.json();
+    const { password } = await request.json();
     const settings = await getSettings();
 
     // Block login via tunnel/tailscale if dashboard access is disabled
@@ -37,38 +37,28 @@ export async function POST(request) {
       return NextResponse.json({ error: "Dashboard access via tunnel is disabled" }, { status: 403 });
     }
 
-    // Se fornecido username, checamos login de usuário (multitenant)
     let userRecord = null;
     let isValid = false;
 
-    if (username && String(username).trim().toLowerCase() !== "admin") {
-      const cleanUsername = String(username).trim().toLowerCase();
-      isValid = await validateUserPassword(cleanUsername, password);
-      if (isValid) {
-        userRecord = await getUserByUsername(cleanUsername);
+    if (settings.authMode === "sso" || settings.authMode === "saml" || settings.authMode === "oidc") {
+      const ssoType = settings.ssoType || (settings.authMode === "saml" ? "saml" : "oidc");
+      if (ssoType === "saml" && isSamlConfigured(settings)) {
+        return NextResponse.json({ error: "Password login is disabled. Use SAML SSO sign in." }, { status: 403 });
       }
-    } else {
-      // Autenticação Admin (legada ou explícita)
-      if (settings.authMode === "sso" || settings.authMode === "saml" || settings.authMode === "oidc") {
-        const ssoType = settings.ssoType || (settings.authMode === "saml" ? "saml" : "oidc");
-        if (ssoType === "saml" && isSamlConfigured(settings)) {
-          return NextResponse.json({ error: "Password login is disabled. Use SAML SSO sign in." }, { status: 403 });
-        }
-        if (ssoType === "oidc" && isOidcConfigured(settings)) {
-          return NextResponse.json({ error: "Password login is disabled. Use OIDC sign in." }, { status: 403 });
-        }
+      if (ssoType === "oidc" && isOidcConfigured(settings)) {
+        return NextResponse.json({ error: "Password login is disabled. Use OIDC sign in." }, { status: 403 });
       }
+    }
 
-      const storedHash = settings.password;
-      if (storedHash) {
-        isValid = await bcrypt.compare(password, storedHash);
-      } else {
-        const initialPassword = process.env.INITIAL_PASSWORD || "123456";
-        isValid = password === initialPassword;
-      }
-      if (isValid) {
-        userRecord = { id: "admin", username: "admin", role: "admin", name: "Administrator" };
-      }
+    const storedHash = settings.password;
+    if (storedHash) {
+      isValid = await bcrypt.compare(password, storedHash);
+    } else {
+      const initialPassword = process.env.INITIAL_PASSWORD || "123456";
+      isValid = password === initialPassword;
+    }
+    if (isValid) {
+      userRecord = { id: "admin", username: "admin", role: "admin", name: "Administrator" };
     }
 
     if (isValid && userRecord) {

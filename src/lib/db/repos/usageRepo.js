@@ -298,21 +298,6 @@ export async function saveRequestUsage(entry) {
       aggregateEntryToDay(day, entry);
       db.run(`INSERT INTO usageDaily(dateKey, data) VALUES(?, ?) ON CONFLICT(dateKey) DO UPDATE SET data = excluded.data`, [dateKey, stringifyJson(day)]);
 
-      // Se a requisição veio com apiKey de um usuário multitenant, debitar da cota
-      if (entry.apiKey && entry.cost > 0) {
-        try {
-          const akRow = db.get(`SELECT userId FROM apiKeys WHERE key = ?`, [entry.apiKey]);
-          if (akRow && akRow.userId) {
-            db.run(
-              `UPDATE users SET currentCycleSpentUsd = currentCycleSpentUsd + ?, updatedAt = ? WHERE id = ?`,
-              [entry.cost, entry.timestamp || new Date().toISOString(), akRow.userId]
-            );
-          }
-        } catch (err) {
-          console.warn("[Usage] Failed to debit user quota:", err.message);
-        }
-      }
-
       // Atomic counter increment in same transaction
       const cur = db.get(`SELECT value FROM _meta WHERE key = 'totalRequestsLifetime'`);
       const next = (cur ? parseInt(cur.value, 10) : 0) + 1;

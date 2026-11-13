@@ -1,6 +1,4 @@
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { getDashboardAuthSession } from "@/lib/auth/dashboardSession";
 import { getSettings, updateSettings } from "@/lib/localDb";
 import { applyOutboundProxyEnv } from "@/lib/network/outboundProxy";
 import { resetComboRotation } from "open-sse/services/combo.js";
@@ -44,12 +42,6 @@ export async function GET() {
 
 export async function PATCH(request) {
   try {
-    const cookieStore = await cookies();
-    const session = await getDashboardAuthSession(cookieStore.get("auth_token")?.value);
-    if (session && session.role === "client") {
-      return NextResponse.json({ error: "Forbidden: Clients cannot alter global server settings" }, { status: 403 });
-    }
-
     const body = await request.json();
 
     // Strip protected secrets before any internal handling sets them

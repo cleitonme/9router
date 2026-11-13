@@ -11,13 +11,6 @@ async function checkKeyOwnership(keyId) {
   const key = await getApiKeyById(keyId);
   if (!key) return { allowed: false, error: "Key not found", status: 404 };
 
-  // Se for cliente, só pode acessar chaves vinculadas ao seu próprio userId
-  if (session.role === "client") {
-    if (key.userId !== session.userId) {
-      return { allowed: false, error: "Forbidden: You do not own this API key", status: 403 };
-    }
-  }
-
   return { allowed: true, key, session };
 }
 

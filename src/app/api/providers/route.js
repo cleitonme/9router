@@ -1,6 +1,4 @@
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { getDashboardAuthSession } from "@/lib/auth/dashboardSession";
 import {
   getProviderConnections,
   createProviderConnection,
@@ -48,15 +46,9 @@ async function normalizeProxyPoolId(proxyPoolId) {
   return { proxyPoolId: normalizedId };
 }
 
-// GET /api/providers - List all connections (Admin only)
+// GET /api/providers - List all connections
 export async function GET() {
   try {
-    const cookieStore = await cookies();
-    const session = await getDashboardAuthSession(cookieStore.get("auth_token")?.value);
-    if (session && session.role === "client") {
-      return NextResponse.json({ error: "Forbidden: Clients cannot access upstream provider configurations" }, { status: 403 });
-    }
-
     const connections = await getProviderConnections();
 
     // Build nodeNameMap for compatible providers (id → name)
@@ -94,12 +86,6 @@ export async function GET() {
 // POST /api/providers - Create new connection (API Key only, OAuth via separate flow)
 export async function POST(request) {
   try {
-    const cookieStore = await cookies();
-    const session = await getDashboardAuthSession(cookieStore.get("auth_token")?.value);
-    if (session && session.role === "client") {
-      return NextResponse.json({ error: "Forbidden: Clients cannot create upstream providers" }, { status: 403 });
-    }
-
     const body = await request.json();
     const provider = normalizeProviderId(body.provider);
     const { apiKey, name, displayName, priority, globalPriority, defaultModel, testStatus } = body;

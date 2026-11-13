@@ -32,12 +32,6 @@ export {
   getApiKeys, getApiKeyById, createApiKey, updateApiKey, deleteApiKey, validateApiKey,
 } from "./repos/apiKeysRepo.js";
 
-// Users / Multitenant
-export {
-  getUsers, getUserById, getUserByUsername, createUser, updateUser,
-  updateUserPassword, deleteUser, validateUserPassword, checkUserQuota, recordUserSpend,
-} from "./repos/usersRepo.js";
-
 // Combos
 export {
   getCombos, getComboById, getComboByName,

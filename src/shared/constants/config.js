@@ -34,7 +34,6 @@ export const SUBSCRIPTION_CONFIG = {
 
 // API endpoints
 export const API_ENDPOINTS = {
-  users: "/api/users",
   providers: "/api/providers",
   payments: "/api/payments",
   auth: "/api/auth",

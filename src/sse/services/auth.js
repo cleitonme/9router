@@ -511,22 +511,9 @@ export function extractApiKey(request) {
 }
 
 /**
- * Validate API key and resolve ownership/tenancy info
+ * Validate API key
  */
 export async function isValidApiKey(apiKey) {
   if (!apiKey) return false;
-  const res = await validateApiKey(apiKey);
-  if (!res) return false;
-  if (typeof res === "object") return res.valid === true;
-  return res === true;
-}
-
-export async function resolveApiKeyUser(apiKey) {
-  if (!apiKey) return null;
-  const res = await validateApiKey(apiKey);
-  if (res && typeof res === "object" && res.userId) {
-    const { getUserById } = await import("@/lib/localDb");
-    return await getUserById(res.userId);
-  }
-  return null;
+  return await validateApiKey(apiKey) === true;
 }

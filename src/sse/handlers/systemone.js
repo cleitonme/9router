@@ -230,43 +230,7 @@ async function handleMultiSystemone({ body, targets, apiKey, url }) {
   const { mode, models, autoDiscovered } = targets;
   log.info("SYSTEMONE", `${mode} with ${models.length} models (strategy: fallback, sequential${autoDiscovered ? ", auto-discovered" : ""})`);
 
-  // Multitenant whitelist (mirrors handleChat): filter candidates per user.
-  let candidates = models;
-  if (apiKey) {
-    try {
-      const { resolveApiKeyUser } = await import("@/sse/services/auth.js");
-      const tenantUser = await resolveApiKeyUser(apiKey);
-      const allowedModels = tenantUser?.allowedModels || [];
-      const allowedCombos = tenantUser?.allowedCombos || [];
-      if (tenantUser && (allowedModels.length > 0 || allowedCombos.length > 0)) {
-        const { getComboById, getComboByName } = await import("@/lib/localDb");
-        const permitted = [];
-        for (const m of models) {
-          if (allowedModels.includes(m)) {
-            permitted.push(m);
-            continue;
-          }
-          let ok = false;
-          for (const comboRef of allowedCombos) {
-            const comboObj = (await getComboById(comboRef)) || (await getComboByName(comboRef));
-            if (comboObj && (comboObj.name === m || comboObj.id === m || (Array.isArray(comboObj.models) && comboObj.models.includes(m)))) {
-              ok = true;
-              break;
-            }
-          }
-          if (ok) permitted.push(m);
-          else log.warn("SYSTEMONE", `Model "${m}" not allowed for user ${tenantUser.username}, skipping`);
-        }
-        if (permitted.length === 0) {
-          log.warn("SYSTEMONE", `No allowed models for user ${tenantUser.username} in ${mode} list`);
-          return errorResponse(HTTP_STATUS.FORBIDDEN, "None of the requested models are allowed for your account.");
-        }
-        candidates = permitted;
-      }
-    } catch {
-      // fail-open: if tenant resolution fails, try the full list
-    }
-  }
+  const candidates = models;
 
   const attempted = [];
   const errors = [];
