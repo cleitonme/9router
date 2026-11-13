@@ -54,11 +54,16 @@ export async function syncWebsharePools(options = {}) {
 
     const now = new Date().toISOString();
     const prevSyncCount = config.stats?.syncCount || 0;
+    const websharePools = (await getProxyPools()).filter((p) => p.name.startsWith("Webshare "));
     await updateSettings({
       webshareSync: {
         lastSyncAt: now,
-        syncCount: prevSyncCount + 1,
         syncDurationMs: durationMs,
+        stats: {
+          syncCount: prevSyncCount + 1,
+          totalPools: websharePools.length,
+          activePools: websharePools.filter((p) => p.isActive).length,
+        },
         lastSyncResult: {
           ...result,
           completedAt: now,
@@ -66,6 +71,7 @@ export async function syncWebsharePools(options = {}) {
         },
       },
     });
+    g.lastSyncTimestamp = endTime;
 
     return { success: true, ...result };
   } catch (err) {
@@ -246,6 +252,13 @@ export function stopWebshareSyncScheduler() {
     schedulerTimer = null;
     console.log("[WebshareSync] Scheduler stopped");
   }
+}
+
+// Recreate the interval so a changed syncIntervalMinutes takes effect without a
+// server restart.
+export function restartWebshareSyncScheduler() {
+  stopWebshareSyncScheduler();
+  return startWebshareSyncScheduler();
 }
 
 export function isWebshareSyncSchedulerRunning() {

@@ -5,6 +5,7 @@ import { Badge, Button, Card, CardSkeleton, Input, Modal, Toggle, ConfirmModal }
 import { useNotificationStore } from "@/store/notificationStore";
 import { getVisibleProxyPoolSelection, updateProxyPoolSelection } from "@/shared/utils/proxyPoolSelection";
 import WebshareConfigCard from "./components/WebshareConfigCard";
+import WebshareConfigModal from "./components/WebshareConfigModal";
 
 function getStatusVariant(status) {
   if (status === "active") return "success";
@@ -34,17 +35,7 @@ export default function ProxyPoolsPage() {
   const [loading, setLoading] = useState(true);
   const [showFormModal, setShowFormModal] = useState(false);
   const [showBatchImportModal, setShowBatchImportModal] = useState(false);
-  const [showWebshareModal, setShowWebshareModal] = useState(false);
-  const [webshareForm, setWebshareForm] = useState({
-    apiKey: "",
-    mode: "direct",
-    pageSize: "100",
-    planId: "",
-    autoReplaceOnWebshare: true,
-    removeDeadFrom9Router: true,
-  });
-  const [webshareImporting, setWebshareImporting] = useState(false);
-  const [webshareSyncing, setWebshareSyncing] = useState(false);
+  const [showWebshareConfigModal, setShowWebshareConfigModal] = useState(false);
   const [showVercelModal, setShowVercelModal] = useState(false);
   const [showCloudflareModal, setShowCloudflareModal] = useState(false);
   const [showDenoModal, setShowDenoModal] = useState(false);
@@ -653,72 +644,6 @@ export default function ProxyPoolsPage() {
     }
   };
 
-  const handleWebshareImport = async () => {
-    if (!webshareForm.apiKey.trim()) return;
-    setWebshareImporting(true);
-    try {
-      const res = await fetch("/api/proxy-pools/webshare", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          apiKey: webshareForm.apiKey.trim(),
-          mode: webshareForm.mode,
-          pageSize: Number(webshareForm.pageSize) || 100,
-          planId: webshareForm.planId.trim() || undefined,
-        }),
-      });
-
-      const data = await res.json();
-      if (res.ok) {
-        await fetchProxyPools();
-        setShowWebshareModal(false);
-        setWebshareForm((prev) => ({ ...prev, apiKey: "" }));
-        notify.success(`Webshare: Imported ${data.created} proxies (Skipped: ${data.skipped}, Total: ${data.total})`);
-      } else {
-        notify.error(data.error || "Failed to import from Webshare");
-      }
-    } catch (err) {
-      console.error("Webshare import error:", err);
-      notify.error("Error connecting to Webshare API");
-    } finally {
-      setWebshareImporting(false);
-    }
-  };
-
-  const handleWebshareSyncAndReplace = async () => {
-    if (!webshareForm.apiKey.trim()) return;
-    setWebshareSyncing(true);
-    try {
-      const res = await fetch("/api/proxy-pools/webshare/sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          apiKey: webshareForm.apiKey.trim(),
-          autoReplaceOnWebshare: webshareForm.autoReplaceOnWebshare,
-          removeDeadFrom9Router: webshareForm.removeDeadFrom9Router,
-          pageSize: Number(webshareForm.pageSize) || 100,
-          planId: webshareForm.planId.trim() || undefined,
-        }),
-      });
-
-      const data = await res.json();
-      if (res.ok) {
-        await fetchProxyPools();
-        setShowWebshareModal(false);
-        notify.success(
-          `Sync concluído! Mortos detectados: ${data.deadDetected}, Removidos: ${data.removedFrom9Router}, Novos adicionados: ${data.addedFromWebshare}`
-        );
-      } else {
-        notify.error(data.error || "Falha na sincronização do Webshare");
-      }
-    } catch (err) {
-      console.error("Webshare sync error:", err);
-      notify.error("Erro ao sincronizar com Webshare");
-    } finally {
-      setWebshareSyncing(false);
-    }
-  };
-
   // Cidades únicas extraídas para o filtro
   const availableCities = useMemo(() => {
     const set = new Set();
@@ -867,8 +792,8 @@ export default function ProxyPoolsPage() {
             )}
           </div>
 
-          <Button size="sm" variant="secondary" icon="download" onClick={() => setShowWebshareModal(true)}>
-            Import Webshare
+          <Button size="sm" variant="secondary" icon="cloud" onClick={() => setShowWebshareConfigModal(true)}>
+            Webshare
           </Button>
           <Button size="sm" variant="secondary" icon="upload" onClick={openBatchImportModal}>
             Batch Import
@@ -1145,11 +1070,16 @@ export default function ProxyPoolsPage() {
       </Card>
 
       <WebshareConfigCard
-        settings={{
-          webshareSync: webshareConfig,
-        }}
-        onUpdate={fetchProxyPools}
+        webshareSync={webshareConfig}
+        onOpenConfig={() => setShowWebshareConfigModal(true)}
         onSync={fetchProxyPools}
+      />
+
+      <WebshareConfigModal
+        isOpen={showWebshareConfigModal}
+        onClose={() => setShowWebshareConfigModal(false)}
+        webshareSync={webshareConfig}
+        onUpdated={fetchProxyPools}
       />
 
       <Modal
@@ -1411,106 +1341,6 @@ export default function ProxyPoolsPage() {
               Cancel
             </Button>
           </div>
-        </div>
-      </Modal>
-
-      <Modal
-        isOpen={showWebshareModal}
-        title="Import Proxies from Webshare.io"
-        onClose={() => setShowWebshareModal(false)}
-      >
-        <div className="flex flex-col gap-4">
-          <p className="text-xs text-text-muted">
-            Enter your Webshare API Token to automatically fetch and configure your assigned proxy list.
-            You can find your API key in your{" "}
-            <a
-              href="https://dashboard.webshare.io/userapi/keys"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-primary hover:underline"
-            >
-              Webshare Dashboard →
-            </a>
-          </p>
-          <Input
-            label="Webshare API Token"
-            type="password"
-            placeholder="Paste your Webshare API key / token"
-            value={webshareForm.apiKey}
-            onChange={(e) => setWebshareForm((prev) => ({ ...prev, apiKey: e.target.value }))}
-          />
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs font-medium text-text-main mb-1 block">Modo</label>
-              <select
-                className="w-full bg-surface-muted border border-border rounded-lg px-3 py-2 text-xs text-text-main focus:outline-none focus:border-primary"
-                value={webshareForm.mode}
-                onChange={(e) => setWebshareForm((prev) => ({ ...prev, mode: e.target.value }))}
-              >
-                <option value="direct">Direct</option>
-                <option value="backbone">Backbone</option>
-              </select>
-            </div>
-            <Input
-              label="Quantidade (Ex: 100)"
-              type="number"
-              placeholder="100"
-              value={webshareForm.pageSize}
-              onChange={(e) => setWebshareForm((prev) => ({ ...prev, pageSize: e.target.value }))}
-            />
-          </div>
-          <Input
-            label="Plan ID Opcional (se tiver múltiplos planos)"
-            placeholder="Ex: 2 (deixe vazio para usar o padrão)"
-            value={webshareForm.planId}
-            onChange={(e) => setWebshareForm((prev) => ({ ...prev, planId: e.target.value }))}
-          />
-          <div className="flex flex-col gap-2 rounded-lg border border-border/60 bg-surface-muted/50 p-3 text-xs">
-            <label className="flex items-center gap-2 cursor-pointer font-medium text-text-main">
-              <input
-                type="checkbox"
-                checked={webshareForm.autoReplaceOnWebshare}
-                onChange={(e) => setWebshareForm((prev) => ({ ...prev, autoReplaceOnWebshare: e.target.checked }))}
-                className="size-4 rounded"
-              />
-              Auto-solicitar substituição na API Webshare para IPs mortos
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer font-medium text-text-main">
-              <input
-                type="checkbox"
-                checked={webshareForm.removeDeadFrom9Router}
-                onChange={(e) => setWebshareForm((prev) => ({ ...prev, removeDeadFrom9Router: e.target.checked }))}
-                className="size-4 rounded"
-              />
-              Remover proxies mortos do 9Router e adicionar novos substitutos
-            </label>
-          </div>
-
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 mt-2">
-            <Button
-              fullWidth
-              onClick={handleWebshareImport}
-              disabled={!webshareForm.apiKey.trim() || webshareImporting || webshareSyncing}
-            >
-              {webshareImporting ? "Buscando Proxies..." : "Importar Lista"}
-            </Button>
-            <Button
-              fullWidth
-              variant="secondary"
-              onClick={handleWebshareSyncAndReplace}
-              disabled={!webshareForm.apiKey.trim() || webshareImporting || webshareSyncing}
-            >
-              {webshareSyncing ? "Verificando e Substituindo..." : "Sync & Auto-Replace"}
-            </Button>
-          </div>
-          <Button
-            fullWidth
-            variant="ghost"
-            onClick={() => setShowWebshareModal(false)}
-            disabled={webshareImporting || webshareSyncing}
-          >
-            Fechar
-          </Button>
         </div>
       </Modal>
 

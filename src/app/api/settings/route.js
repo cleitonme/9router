@@ -33,6 +33,7 @@ export async function GET() {
       webshareSync: webshareSync ? {
         ...webshareSync,
         apiKey: "",
+        apiKeyConfigured: !!webshareSync.apiKey?.trim(),
       } : undefined,
     }, { headers: SETTINGS_RESPONSE_HEADERS });
   } catch (error) {
