@@ -164,6 +164,11 @@ export function isEmptyCompletionBody(body) {
     }
     return true;
   }
+  // Bare text shape (`{ "text": "..." }`) served by some custom
+  // OpenAI-compatible models. An empty/blank/absent text is a hollow 200.
+  if ("text" in body) return !(typeof body.text === "string" && body.text.trim().length > 0);
+  // Nothing at all was returned (`{}`, `[]`).
+  if (Object.keys(body).length === 0) return true;
   // Unrecognized shape — fail-open, never invent emptiness.
   return false;
 }

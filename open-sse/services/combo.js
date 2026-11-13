@@ -10,6 +10,7 @@ import { classifyError } from "../utils/classifyError.js";
 import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
+import { CLAUDE_BLOCK, RESPONSES_ITEM } from "../translator/schema/blocks.js";
 import { clearStickySession } from "./comboStickiness.js";
 
 // Hard capabilities = input modalities; missing one drops request data (e.g. image
@@ -401,44 +402,62 @@ export function getComboModelsFromData(modelStr, combosData) {
   return null;
 }
 
+// Non-whitespace string.
+const hasText = (s) => typeof s === "string" && s.trim().length > 0;
+
 /**
- * Detect whether a 2xx JSON response contains zero usable content
- * (e.g. empty assistant message with in_progress/incomplete)
- * so combo fallback can continue to the next model.
+ * Detect whether a 2xx JSON response carries zero usable content, so combo
+ * fallback can continue to the next model instead of handing the client a
+ * hollow 200. A "200 + empty answer" looks like success to the HTTP-status
+ * check, which is exactly what stalls agents (#2229).
+ *
+ * Content means anything the caller can act on: answer text, a tool call, or
+ * reasoning. An empty body, an unknown shape (`{}`), or a shape that only
+ * carries `{"text": ""}` is zero content.
  */
 export function isZeroContentResponse(data) {
-  if (!data || typeof data !== "object") return false;
+  if (!data || typeof data !== "object") return true;
 
   // OpenAI chat format
   if (Array.isArray(data.choices)) {
     if (data.choices.length === 0) return true;
     const choice = data.choices[0];
     if (!choice) return true;
-
-    const msg = choice.message || choice.delta;
-    const content = msg?.content;
-    const hasContent = typeof content === "string" ? content.trim().length > 0 : (Array.isArray(content) && content.length > 0);
-    const hasToolCalls = (Array.isArray(msg?.tool_calls) && msg.tool_calls.length > 0) || Boolean(msg?.function_call);
-    const hasReasoning = typeof msg?.reasoning_content === "string" ? msg.reasoning_content.trim().length > 0 : false;
-
-    const finish = choice.finish_reason;
-    const isNormalFinish = finish === "stop" || finish === "length" || finish === "tool_calls" || finish === "function_call";
-
-    if (!hasContent && !hasToolCalls && !hasReasoning && (!isNormalFinish || finish === "in_progress" || finish === "incomplete")) {
-      return true;
-    }
+    const msg = choice.message || choice.delta || {};
+    if (typeof msg.content === "string" ? hasText(msg.content) : Array.isArray(msg.content) && msg.content.length > 0) return false;
+    if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) return false;
+    if (msg.function_call) return false;
+    if (hasText(msg.reasoning_content)) return false;
+    return !hasText(choice.text);
   }
 
-  // Anthropic messages format
+  // Anthropic messages format (thinking blocks are not answer text, same rule as streams)
   if (Array.isArray(data.content)) {
-    const hasContent = data.content.some((c) => (c.type === "text" && c.text?.trim().length > 0) || c.type === "tool_use");
-    const stopReason = data.stop_reason;
-    if (!hasContent && (!stopReason || stopReason === "in_progress" || stopReason === "incomplete")) {
-      return true;
-    }
+    return !data.content.some((c) =>
+      (c?.type === CLAUDE_BLOCK.TEXT && hasText(c.text)) ||
+      c?.type === CLAUDE_BLOCK.TOOL_USE ||
+      hasText(c?.thinking));
   }
 
-  return false;
+  // Gemini native format
+  const parts = data.candidates?.[0]?.content?.parts;
+  if (Array.isArray(parts)) {
+    return !parts.some((p) => p?.functionCall || hasText(p?.text) || p?.inlineData?.data || p?.inline_data?.data);
+  }
+
+  // OpenAI Responses format
+  if (Array.isArray(data.output)) {
+    return !data.output.some((o) => {
+      if (Array.isArray(o?.content)) return o.content.some((c) => hasText(c?.text));
+      return o?.type === RESPONSES_ITEM.FUNCTION_CALL || o?.type === RESPONSES_ITEM.CUSTOM_TOOL_CALL;
+    });
+  }
+
+  // Bare text shape (`{ "text": "..." }`) served by some custom OpenAI-compatible models.
+  if ("text" in data) return !hasText(data.text);
+
+  // Empty object: nothing at all was returned.
+  return Object.keys(data).length === 0;
 }
 
 /**
@@ -528,24 +547,26 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
     try {
       const result = await handleSingleModel(body, modelStr);
       
-      // Success (2xx) - return response unless empty/zero-content on a non-final seat
+      // Success (2xx) - return response unless it carries zero usable content.
+      // Checked on every seat: a 200 that carries nothing (`{}`, `{"text":""}`,
+      // an empty message) is not success — retry the next candidate, and if none
+      // carries content the combo ends in the error envelope below instead of
+      // passing a hollow 200 to the client (#2229).
       if (result.ok) {
-        const isLastModel = i === rotatedModels.length - 1;
-        if (!isLastModel) {
-          const contentType = result.headers?.get?.("content-type") || "";
-          if (contentType.includes("application/json")) {
-            try {
-              const peekBody = await result.clone().json();
-              if (isZeroContentResponse(peekBody)) {
-                log.warn("COMBO", `Model ${modelStr} returned HTTP 200 with zero usable content, falling back to next model`);
-                notifyModelFailure(modelStr);
-                lastError = "Zero usable content";
-                lastStatus = 200;
-                continue;
-              }
-            } catch {
-              // Ignore JSON parse errors
-            }
+        const contentType = result.headers?.get?.("content-type") || "";
+        if (contentType.includes("application/json")) {
+          let peekBody = null;
+          try {
+            peekBody = await result.clone().json();
+          } catch {
+            // Ignore JSON parse errors
+          }
+          if (peekBody !== null && isZeroContentResponse(peekBody)) {
+            log.warn("COMBO", `Model ${modelStr} returned HTTP 200 with zero usable content, falling back to next model`);
+            notifyModelFailure(modelStr);
+            lastError = "Zero usable content";
+            if (!lastStatus) lastStatus = 502;
+            continue;
           }
         }
 

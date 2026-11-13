@@ -92,6 +92,16 @@ describe("isEmptyCompletionBody", () => {
     expect(isEmptyCompletionBody({ type: "message", content: [] })).toBe(true);
     expect(isEmptyCompletionBody({ object: "response", output: [] })).toBe(true);
   });
+  it("flags bare empty text and empty objects (#2229)", () => {
+    expect(isEmptyCompletionBody({ text: "" })).toBe(true);
+    expect(isEmptyCompletionBody({ text: "   " })).toBe(true);
+    expect(isEmptyCompletionBody({})).toBe(true);
+  });
+  it("keeps bare text content and unknown non-empty shapes", () => {
+    expect(isEmptyCompletionBody({ text: "hi" })).toBe(false);
+    expect(isEmptyCompletionBody({ data: [{ url: "https://x/y.png" }] })).toBe(false);
+    expect(isEmptyCompletionBody({ results: [] })).toBe(false);
+  });
 });
 
 describe("gateUpstreamStream", () => {
