@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { Badge, Button, Card, CardSkeleton, Input, Modal, Toggle, ConfirmModal } from "@/shared/components";
 import { useNotificationStore } from "@/store/notificationStore";
+import { getVisibleProxyPoolSelection, updateProxyPoolSelection } from "@/shared/utils/proxyPoolSelection";
 import WebshareConfigCard from "./components/WebshareConfigCard";
 
 function getStatusVariant(status) {
@@ -60,7 +61,7 @@ export default function ProxyPoolsPage() {
   const [importing, setImporting] = useState(false);
   const [deploying, setDeploying] = useState(false);
   const [testingId, setTestingId] = useState(null);
-  const [selectedIds, setSelectedIds] = useState([]);
+  const [selectedPoolIds, setSelectedPoolIds] = useState([]);
   const [healthChecking, setHealthChecking] = useState(false);
   const [healthProgress, setHealthProgress] = useState({ current: 0, total: 0 });
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -73,6 +74,8 @@ export default function ProxyPoolsPage() {
   const [filterStatus, setFilterStatus] = useState("all");
   const [filterOrigin, setFilterOrigin] = useState("all");
   const relayMenuRef = useRef(null);
+  const selectionAnchorRef = useRef(null);
+  const filteredPoolsRef = useRef([]);
   const notify = useNotificationStore();
 
   useEffect(() => {
@@ -263,13 +266,13 @@ export default function ProxyPoolsPage() {
     }
   };
 
-  const allSelected = proxyPools.length > 0 && selectedIds.length === proxyPools.length;
-  const toggleSelect = (id) => setSelectedIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
-  const toggleSelectAll = () => setSelectedIds(allSelected ? [] : proxyPools.map((p) => p.id));
-  const clearSelection = () => setSelectedIds([]);
+  const clearSelection = () => {
+    setSelectedPoolIds([]);
+    selectionAnchorRef.current = null;
+  };
 
   const bulkSetActive = async (isActive) => {
-    const targets = selectedIds.length > 0 ? selectedIds : proxyPools.map((p) => p.id);
+    const targets = selectedIds.length > 0 ? selectedIds : filteredProxyPools.map((p) => p.id);
     if (targets.length === 0) return;
     setBulkBusy(true);
     try {
@@ -297,11 +300,13 @@ export default function ProxyPoolsPage() {
       title: "Delete Proxy Pools",
       message: `Delete ${selectedIds.length} proxy pool(s)?`,
       onConfirm: async () => {
+        // A pending test can change a pool's status while confirmation is open.
+        const targets = getVisibleProxyPoolSelection(filteredPoolsRef.current, selectedPoolIds);
         setConfirmState(null);
         setBulkBusy(true);
         try {
           let ok = 0; let blocked = 0; let failed = 0;
-          for (const id of selectedIds) {
+          for (const id of targets) {
             try {
               const res = await fetch(`/api/proxy-pools/${id}`, { method: "DELETE" });
               if (res.ok) ok += 1;
@@ -321,8 +326,8 @@ export default function ProxyPoolsPage() {
 
   const handleHealthCheck = async () => {
     const targets = selectedIds.length > 0
-      ? proxyPools.filter((p) => selectedIds.includes(p.id))
-      : proxyPools;
+      ? filteredProxyPools.filter((p) => selectedIds.includes(p.id))
+      : filteredProxyPools;
     if (targets.length === 0) return;
     setHealthChecking(true);
     setHealthProgress({ current: 0, total: targets.length });
@@ -382,9 +387,9 @@ export default function ProxyPoolsPage() {
     }
   };
 
-  // Cleanup selectedIds when pools change
+  // Cleanup selectedPoolIds when pools are deleted
   useEffect(() => {
-    setSelectedIds((prev) => prev.filter((id) => proxyPools.some((p) => p.id === id)));
+    setSelectedPoolIds((prev) => prev.filter((id) => proxyPools.some((p) => p.id === id)));
   }, [proxyPools]);
 
   const openBatchImportModal = () => {
@@ -726,36 +731,60 @@ export default function ProxyPoolsPage() {
   }, [proxyPools]);
 
   // Proxies filtrados dinamicamente
-  const filteredProxyPools = useMemo(() => {
-    return proxyPools.filter((pool) => {
-      // 1. Busca por texto
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const matchesName = pool.name?.toLowerCase().includes(q);
-        const matchesUrl = pool.proxyUrl?.toLowerCase().includes(q);
-        const matchesCity = pool.cityName?.toLowerCase().includes(q);
-        if (!matchesName && !matchesUrl && !matchesCity) return false;
-      }
-      // 2. Filtro de cidade
-      if (filterCity !== "all") {
-        const matchCity = pool.name?.match(/\s+-\s+(.+)$/);
-        const city = pool.cityName || (matchCity ? matchCity[1] : null);
-        if (city?.trim() !== filterCity) return false;
-      }
-      // 3. Filtro de status
-      if (filterStatus === "active" && !pool.isActive) return false;
-      if (filterStatus === "inactive" && pool.isActive) return false;
-      if (filterStatus === "healthy" && pool.testStatus !== "active") return false;
-      if (filterStatus === "error" && pool.testStatus !== "error") return false;
+  // Plain expression: React Compiler auto-memoizes it, and wrapping it in
+  // useMemo broke its memoization once the selection helpers started reading it.
+  const filteredProxyPools = proxyPools.filter((pool) => {
+    // 1. Busca por texto
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      const matchesName = pool.name?.toLowerCase().includes(q);
+      const matchesUrl = pool.proxyUrl?.toLowerCase().includes(q);
+      const matchesCity = pool.cityName?.toLowerCase().includes(q);
+      if (!matchesName && !matchesUrl && !matchesCity) return false;
+    }
+    // 2. Filtro de cidade
+    if (filterCity !== "all") {
+      const matchCity = pool.name?.match(/\s+-\s+(.+)$/);
+      const city = pool.cityName || (matchCity ? matchCity[1] : null);
+      if (city?.trim() !== filterCity) return false;
+    }
+    // 3. Filtro de status
+    if (filterStatus === "active" && !pool.isActive) return false;
+    if (filterStatus === "inactive" && pool.isActive) return false;
+    if (filterStatus === "healthy" && pool.testStatus !== "active") return false;
+    if (filterStatus === "error" && pool.testStatus !== "error") return false;
 
-      // 4. Filtro de origem
-      if (filterOrigin === "webshare" && !pool.name?.startsWith("Webshare") && !pool.proxyUrl?.includes("webshare")) return false;
-      if (filterOrigin === "relay" && pool.type !== "vercel" && pool.type !== "cloudflare" && pool.type !== "deno" && pool.type !== "netlify") return false;
-      if (filterOrigin === "custom" && (pool.name?.startsWith("Webshare") || pool.type === "vercel" || pool.type === "cloudflare" || pool.type === "deno" || pool.type === "netlify")) return false;
+    // 4. Filtro de origem
+    if (filterOrigin === "webshare" && !pool.name?.startsWith("Webshare") && !pool.proxyUrl?.includes("webshare")) return false;
+    if (filterOrigin === "relay" && pool.type !== "vercel" && pool.type !== "cloudflare" && pool.type !== "deno" && pool.type !== "netlify") return false;
+    if (filterOrigin === "custom" && (pool.name?.startsWith("Webshare") || pool.type === "vercel" || pool.type === "cloudflare" || pool.type === "deno" || pool.type === "netlify")) return false;
 
-      return true;
-    });
-  }, [proxyPools, searchQuery, filterCity, filterStatus, filterOrigin]);
+    return true;
+  });
+
+  useEffect(() => {
+    filteredPoolsRef.current = filteredProxyPools;
+  }, [filteredProxyPools]);
+
+  // Changing a filter invalidates the Shift+click anchor but keeps the selection.
+  useEffect(() => {
+    selectionAnchorRef.current = null;
+  }, [searchQuery, filterCity, filterStatus, filterOrigin]);
+
+  // Bulk actions must never include rows hidden by the current filter.
+  const selectedIds = getVisibleProxyPoolSelection(filteredProxyPools, selectedPoolIds);
+  const hiddenSelectedCount = selectedPoolIds.length - selectedIds.length;
+  const allSelected = filteredProxyPools.length > 0 && selectedIds.length === filteredProxyPools.length;
+  const toggleSelect = (id, checked, shiftKey) => {
+    setSelectedPoolIds(prev => updateProxyPoolSelection(filteredProxyPools, prev, {
+      id, checked, shiftKey, anchorId: selectionAnchorRef.current,
+    }));
+    selectionAnchorRef.current = id;
+  };
+  const toggleSelectAll = () => {
+    setSelectedPoolIds(allSelected ? [] : filteredProxyPools.map(pool => pool.id));
+    selectionAnchorRef.current = null;
+  };
 
   const activeCount = useMemo(
     () => proxyPools.filter((pool) => pool.isActive === true).length,
@@ -916,9 +945,10 @@ export default function ProxyPoolsPage() {
                 type="checkbox"
                 checked={allSelected}
                 onChange={toggleSelectAll}
+                disabled={bulkBusy || healthChecking}
                 className="size-4 rounded border-black/20 dark:border-white/20"
               />
-              {allSelected ? "Unselect all" : "Select all"}
+              {allSelected ? "Unselect visible" : "Select all visible"}
             </label>
           )}
           <Badge variant="default">Total: {proxyPools.length}</Badge>
@@ -926,20 +956,23 @@ export default function ProxyPoolsPage() {
           {filteredProxyPools.length !== proxyPools.length && (
             <Badge variant="warning">Filtrados: {filteredProxyPools.length}</Badge>
           )}
+          <span className="text-xs text-text-muted">Shift+click para selecionar intervalo</span>
         </div>
 
-        {(selectedIds.length > 0 || healthChecking) && (
+        {(selectedPoolIds.length > 0 || healthChecking) && (
           <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
             <span className="material-symbols-outlined text-[18px] text-primary">checklist</span>
             <span className="text-xs font-medium text-primary">
-              {selectedIds.length > 0 ? `${selectedIds.length} selected` : "All pools"}
+              {selectedIds.length > 0
+                ? `${selectedIds.length} selected${hiddenSelectedCount > 0 ? ` (+${hiddenSelectedCount} ocultos)` : ""}`
+                : "Visible pools"}
             </span>
             <div className="ml-auto flex flex-wrap items-center gap-2">
               <Button
                 size="sm"
                 icon={healthChecking ? "progress_activity" : "health_and_safety"}
                 onClick={handleHealthCheck}
-                disabled={healthChecking || bulkBusy || proxyPools.length === 0}
+                disabled={healthChecking || bulkBusy || filteredProxyPools.length === 0}
               >
                 {healthChecking ? `Checking ${healthProgress.current}/${healthProgress.total}` : "Health Check"}
               </Button>
@@ -954,11 +987,11 @@ export default function ProxyPoolsPage() {
                   <Button size="sm" variant="secondary" icon="delete" onClick={bulkDelete} disabled={bulkBusy || healthChecking}>
                     Delete
                   </Button>
-                  <Button size="sm" variant="ghost" onClick={clearSelection} disabled={bulkBusy || healthChecking}>
-                    Clear
-                  </Button>
                 </>
               )}
+              <Button size="sm" variant="ghost" onClick={clearSelection} disabled={bulkBusy || healthChecking}>
+                Clear
+              </Button>
             </div>
           </div>
         )}
@@ -987,7 +1020,9 @@ export default function ProxyPoolsPage() {
                   <input
                     type="checkbox"
                     checked={selectedIds.includes(pool.id)}
-                    onChange={() => toggleSelect(pool.id)}
+                    onChange={(event) => toggleSelect(pool.id, event.target.checked, event.nativeEvent.shiftKey === true)}
+                    disabled={bulkBusy || healthChecking}
+                    aria-label={`Select ${pool.name}`}
                     className="mt-1 size-4 shrink-0 rounded border-black/20 dark:border-white/20"
                   />
                   <div className="min-w-0 flex-1">
