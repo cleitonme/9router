@@ -131,6 +131,25 @@ function normalizeString(value) {
   return String(value).trim();
 }
 
+/** scheme://host:port only - never credentials. */
+function safeProxyHost(proxyUrl) {
+  try {
+    const parsed = new URL(String(proxyUrl));
+    return `${parsed.protocol}//${parsed.hostname}${parsed.port ? `:${parsed.port}` : ""}`;
+  } catch {
+    return "unparseable-proxy-url";
+  }
+}
+
+/** Destination host only, never the full URL (which may carry a query/path). */
+function safeTargetHost(url) {
+  try {
+    return new URL(typeof url === "string" ? url : url.toString()).host;
+  } catch {
+    return "unparseable-url";
+  }
+}
+
 /**
  * Resolve real IP using Google DNS (bypass system DNS)
  */
@@ -252,17 +271,33 @@ async function getDispatcher(proxyUrl, insecure = false) {
 }
 
 async function fetchWithTlsFallback(url, options, proxyUrl) {
+  // Adapters that declare `proxyCapable` own their transport (wreq-js TLS
+  // impersonation): they tunnel the proxy themselves and cannot ride an undici
+  // dispatcher. Any other adapter ignores the proxy URL and would leave over
+  // the direct interface, so it stays on the undici path below.
+  const adapterOwnsTransport = options.directFetch?.proxyCapable === true;
   try {
     // Protocol adapters may need Node's HTTP/1 transport on the direct path.
     // Keep proxy/no-proxy resolution and strict-proxy enforcement here.
     // When directFetchProxy is set (e.g. OpenCode TLS impersonation), directFetch
     // also handles proxy egress directly rather than escaping to Node's OpenSSL agent.
-    if (options.directFetch && (options.directFetchProxy || !proxyUrl)) {
-      return await options.directFetch(url, options, { proxyUrl });
+    if (options.directFetch && (adapterOwnsTransport || options.directFetchProxy || !proxyUrl)) {
+      const res = await options.directFetch(url, options, { proxyUrl });
+      if (proxyUrl) {
+        // Reported only after the adapter that holds the tunnel returned. The
+        // value never carries credentials (x-9r-proxy-via is already stripped).
+        const via = res?.headers?.get?.("x-9r-proxy-via");
+        dbg("PROXY", `PROXY ROUTING VERIFIED | ${safeTargetHost(url)} | transport=adapter | proxy=${via || safeProxyHost(proxyUrl)} | status=${res?.status}`);
+      }
+      return res;
     }
     const dispatcher = proxyUrl ? await getDispatcher(proxyUrl) : undefined;
     return await originalFetch(url, dispatcher ? { ...options, dispatcher } : options);
   } catch (err) {
+    // Replaying a transport-owning adapter through Node's OpenSSL agent would
+    // silently drop the impersonated handshake AND the proxy's transport
+    // semantics. Surface the failure instead (strictProxy wraps it upstream).
+    if (proxyUrl && adapterOwnsTransport) throw err;
     const isStrictSsl = process.env.STRICT_SSL === "true" || process.env.STRICT_SSL === "1";
     if (!isStrictSsl && isTlsCertError(err)) {
       if (options.body && typeof options.body.getReader === "function" && options.body.locked) {
@@ -389,6 +424,10 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       if (proxyOptions?.strictProxy === true) {
         throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
       }
+      // A transport-owning adapter holds the tunnel itself: replaying it
+      // without the proxy would leave over the real IP, which is exactly what
+      // the pool exists to prevent.
+      if (options.directFetch?.proxyCapable === true) throw proxyError;
       console.warn(`[ProxyFetch] Proxy failed, falling back to direct: ${proxyError.message}`);
       return fetchWithTlsFallback(url, options, null);
     }

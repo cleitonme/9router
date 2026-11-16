@@ -519,9 +519,11 @@ export class OpenCodeExecutor extends BaseExecutor {
 
   // The free gate keys on the TLS ClientHello, so a native Node fetch is refused
   // no matter how faithful the body is. Route through the impersonating client
-  // and keep proxy handling on the existing path (proxyAwareFetch delegates to
-  // `directFetch` when no proxy is configured). If wreq-js cannot be loaded the
-  // request fails with an actionable OpencodeTlsUnavailableError.
+  // and keep proxy handling on the existing path: proxyAwareFetch delegates to
+  // `directFetch` when no proxy is configured and, because the adapter is
+  // `proxyCapable`, passes the resolved proxy URL through when one is. If
+  // wreq-js cannot be loaded the request fails with an actionable
+  // OpencodeTlsUnavailableError.
   async execute(args) {
     const credentials = this.prepareRequestCredentials(args);
     let providerOverrides = args?.providerOverrides;
@@ -534,24 +536,27 @@ export class OpenCodeExecutor extends BaseExecutor {
       }
       providerOverrides = { ...providerOverrides, headers: sanitized };
     }
+    const directFetch = (url, options, extra = {}) => {
+      const headers = {
+        ...(options?.headers || {}),
+        "x-opencode-request": generateRequestId(),
+      };
+      return opencodeTlsFetch(url, {
+        method: options.method,
+        headers,
+        body: options.body,
+      }, {
+        signal: options.signal,
+        proxyUrl: extra.proxyUrl || options.proxyUrl,
+      });
+    };
+    // wreq-js tunnels the proxy itself; adapters that cannot must stay on undici.
+    directFetch.proxyCapable = true;
     const run = () => super.execute({
       ...args,
       providerOverrides,
       credentials,
-      directFetch: (url, options, extra = {}) => {
-        const headers = {
-          ...(options?.headers || {}),
-          "x-opencode-request": generateRequestId(),
-        };
-        return opencodeTlsFetch(url, {
-          method: options.method,
-          headers,
-          body: options.body,
-        }, {
-          signal: options.signal,
-          proxyUrl: extra.proxyUrl || options.proxyUrl,
-        });
-      },
+      directFetch,
       directFetchProxy: true,
     });
 
