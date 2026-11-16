@@ -452,6 +452,98 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
   });
 });
 
+// A quota/session 429 used to only drop the minted id for the NEXT request; the
+// current one still failed. These pin the in-request re-mint retry, its bound,
+// and that it never touches a native id the client supplied.
+describe("OpenCode free-lane session recovery", () => {
+  const FREE_USAGE = JSON.stringify({
+    type: "error",
+    error: { type: "FreeUsageLimitError", message: "Free usage limit reached. Please try again later." },
+  });
+  const OVERLOAD = JSON.stringify({
+    error: { type: "server_error", message: "The inference service is overloaded. Please try again later." },
+  });
+  const NATIVE = "ses_0123456789abABCDEFGHIJKLMN";
+
+  const resp = (status, body) => new Response(body, {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+  const sessionOf = (call) => call[1].headers["x-opencode-session"];
+  const run = (executor, overrides = {}) => executor.execute({
+    model: "deepseek-v4.1-flash-free",
+    body: { messages: [{ role: "user", content: "say OK" }] },
+    stream: true,
+    credentials: makeCredentials(),
+    ...overrides,
+  });
+
+  it("re-mints the session and retries the current request on a quota 429", async () => {
+    fetchMock
+      .mockResolvedValueOnce(resp(429, FREE_USAGE))
+      .mockResolvedValueOnce(resp(429, FREE_USAGE))
+      .mockResolvedValueOnce(resp(200, "data: ok\n\n"));
+    const executor = getExecutor("opencode");
+
+    const result = await run(executor);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.response.status).toBe(200);
+    expect(await result.response.text()).toBe("data: ok\n\n");
+    const sessions = fetchMock.mock.calls.map(sessionOf);
+    expect(new Set(sessions).size).toBe(3);
+  });
+
+  it("gives up after the session-reset budget and returns the last 429 intact", async () => {
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async () => resp(429, FREE_USAGE));
+    const executor = getExecutor("opencode");
+
+    const result = await run(executor);
+
+    // First attempt + OPENCODE_SESSION_RESET_ATTEMPTS (2) re-mints.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.response.status).toBe(429);
+    expect(await result.response.text()).toBe(FREE_USAGE);
+  });
+
+  it("never re-mints or retries a client-supplied native session", async () => {
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async () => resp(429, FREE_USAGE));
+    const executor = getExecutor("opencode");
+
+    const result = await run(executor, {
+      credentials: makeCredentials({ rawHeaders: { "x-opencode-session": NATIVE } }),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.response.status).toBe(429);
+    expect(fetchMock.mock.calls.map(sessionOf)).toEqual([NATIVE]);
+  });
+
+  it("keeps a single session across overload retries without consuming reset budget", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockReset();
+      fetchMock
+        .mockResolvedValueOnce(resp(429, OVERLOAD))
+        .mockResolvedValueOnce(resp(200, "data: ok\n\n"));
+      const executor = getExecutor("opencode");
+
+      const pending = run(executor);
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await pending;
+
+      expect(result.response.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const [first, second] = fetchMock.mock.calls.map(sessionOf);
+      expect(first).toBe(second);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("OpenCode Helper Functions", () => {
   describe("generateProjectId", () => {
     it("generates stable 40-hex ID from connectionId", () => {
