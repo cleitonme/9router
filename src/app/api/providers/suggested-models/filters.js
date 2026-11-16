@@ -1,4 +1,6 @@
 import { normalizeNousFreeModels } from "open-sse/services/nous.js";
+import { deriveModelName } from "open-sse/providers/models/namePatterns.js";
+import { isLikelyNonChatModelId } from "open-sse/config/catalogConfig.js";
 
 // Free OpenCode models that don't use the "-free" id suffix
 const KNOWN_FREE_OPENCODE_MODELS = ["big-pickle"];
@@ -54,6 +56,29 @@ export const FILTERS = {
       .sort((a, b) => String(a.id).localeCompare(String(b.id))),
 
   "nous-free": normalizeNousFreeModels,
+
+  // AvalAI public catalogue: GET https://api.avalai.ir/public/models (no key)
+  // -> { object:"list", data:[{ id, owned_by, mode, min_tier, max_input_tokens }] }.
+  // AvalAI has no $0 chat models: "free" means min_tier 0 (callable on a free
+  // account with signup credit, no paid tier required). Higher tiers are dropped
+  // so the picker only surfaces models a free key can call. Missing min_tier
+  // fails closed. Non-chat ids that report mode "chat" (tts/audio/guard/ocr) are
+  // filtered by the shared heuristic.
+  "avalai-free": (models) =>
+    (Array.isArray(models) ? models : [])
+      .filter(
+        (m) =>
+          typeof m?.id === "string" &&
+          m.mode === "chat" &&
+          m.min_tier === 0 &&
+          !isLikelyNonChatModelId(m.id)
+      )
+      .map((m) => ({
+        id: m.id,
+        name: deriveModelName(m.id),
+        contextLength: m.max_input_tokens,
+      }))
+      .sort((a, b) => String(a.id).localeCompare(String(b.id))),
 };
 
 // Requesty pricing tier: all price fields must be zero (or absent) for the

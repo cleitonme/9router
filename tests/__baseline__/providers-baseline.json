@@ -710,6 +710,9 @@
     "baseUrl": "https://integrate.api.nvidia.com/v1/chat/completions",
     "validateUrl": "https://integrate.api.nvidia.com/v1/models",
     "timeoutMs": 90000,
+    "quirks": {
+      "dropClientMetadata": true
+    },
     "format": "openai"
   },
   "ollama-local": {
@@ -1221,5 +1224,10 @@
     "baseUrl": "https://internal.chatuncensored.ai",
     "format": "openai",
     "authType": "cookie"
+  },
+  "avalai": {
+    "baseUrl": "https://api.avalai.ir/v1/chat/completions",
+    "validateUrl": "https://api.avalai.ir/v1/models",
+    "format": "openai"
   }
 }
