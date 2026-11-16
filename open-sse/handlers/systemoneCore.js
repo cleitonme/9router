@@ -13,7 +13,8 @@ const OPENCODE_PROVIDERS = new Set(["opencode", "opencode-zen"]);
 /**
  * Core System One (Jev) handler — native decision payload pass-through.
  * URL/headers come from the registry's systemoneConfig; body and JSON response
- * are forwarded untouched (decision models have no chat translation layer).
+ * are forwarded untouched (decision models have no chat translation layer),
+ * except that Cloudflare's { result } envelope is unwrapped.
  *
  * Gateway-only routing fields (`models`, `mode`, `routing`, `combo`) are
  * stripped before forwarding so upstream lanes only see the native
@@ -145,6 +146,12 @@ export async function handleSystemoneCore({
     responseBody = await providerResponse.json();
   } catch {
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Invalid JSON response from ${provider}`);
+  }
+
+  // Cloudflare's REST API wraps the answer as { result: {...}, success, errors, messages }.
+  // Callers speak System One, so hand them the inner result like any other provider's.
+  if (responseBody?.result?.answers && !responseBody.answers) {
+    responseBody = responseBody.result;
   }
 
   if (onRequestSuccess) await onRequestSuccess();
