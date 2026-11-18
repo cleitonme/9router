@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { createHash } from "node:crypto";
 import { getProviderNodeById } from "@/models";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getDefaultModel } from "open-sse/config/providerModels.js";
@@ -426,9 +427,17 @@ export async function POST(request) {
         }
 
         case "opencode-go": {
+          // Session id derived from key hash so validate looks like a normal
+          // session; upgrade path = per-request session from the executor.
+          const sessionId = "validate-" + createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
           const res = await fetch("https://opencode.ai/zen/go/v1/chat/completions", {
             method: "POST",
-            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${apiKey}`,
+              "x-opencode-session": sessionId,
+              "x-opencode-session-id": sessionId,
+            },
             body: JSON.stringify({
               model: getDefaultModel("opencode-go"),
               messages: [{ role: "user", content: "ping" }],

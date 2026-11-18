@@ -225,20 +225,36 @@ function headersHaveSessionHints(headers) {
   return false;
 }
 
-function identityKey(credentials) {
-  const connectionId = credentials?.connectionId || credentials?.id;
-  if (connectionId) return `opencode:conn:${String(connectionId).slice(0, 128)}`;
+// Generic chat apps all map to clientTool null; fall back to the raw
+// User-Agent so each downstream app keeps its own session/quota pool.
+function clientIdentity(clientTool, headers) {
+  const named = String(clientTool || "").trim();
+  if (named) return named;
+  const ua = String(headers?.["user-agent"] || headers?.["User-Agent"] || "");
+  return ua ? crypto.createHash("sha256").update(ua).digest("hex").slice(0, 16) : "";
+}
+
+// Include the downstream client identity: every app sharing one 9Router API
+// key otherwise pools into one upstream session (upstream quota is per
+// session, on an anonymous "Bearer public" lane), so two coding agents
+// running together burn that session's free-tier quota and surface 429
+// FreeUsageLimitError — while a native opencode client, which sends its own
+// session, keeps its separate pool.
+function identityKey(credentials, clientTool = "") {
   const raw = credentials?.rawHeaders || {};
+  const client = clientIdentity(clientTool, raw) || "generic";
+  const connectionId = credentials?.connectionId || credentials?.id;
+  if (connectionId) return `opencode:conn:${String(connectionId).slice(0, 128)}:${client}`;
   const auth = raw.authorization || raw.Authorization || raw["x-api-key"] || raw["X-Api-Key"] || "";
   if (auth) {
     const digest = crypto.createHash("sha256").update(String(auth)).digest("hex").slice(0, 32);
-    return `opencode:auth:${digest}`;
+    return `opencode:auth:${digest}:${client}`;
   }
-  return "opencode:default";
+  return `opencode:default:${client}`;
 }
 
-export function stableSessionId(credentials) {
-  const key = identityKey(credentials);
+export function stableSessionId(credentials, clientTool = "") {
+  const key = identityKey(credentials, clientTool);
   const existing = stableOpencodeSessions.get(key);
   if (existing) {
     existing.lastUsed = Date.now();
@@ -324,6 +340,15 @@ function resolveOpencodeSession(body, credentials, providerSessionId, clientTool
   const native = nativeSession(headers);
   if (native) return native;
 
+  // Generic chat apps all map to clientTool null; fall back to the raw
+  // User-Agent so each downstream app keeps its own session/quota pool.
+  const client = clientIdentity(clientTool, headers);
+  // The no-auth/free lane has no connectionId, only the synthetic `id:
+  // "noauth"` returned by getProviderCredentials; identityKey already falls
+  // back to it, so session resolution must too or it mints a random session
+  // per request and burns the per-session quota.
+  const connectionId = credentials?.connectionId || credentials?.id;
+
   let incoming = null;
   for (const [key, value] of Object.entries(headers)) {
     if (key.toLowerCase() === SESSION_HEADER) {
@@ -333,10 +358,13 @@ function resolveOpencodeSession(body, credentials, providerSessionId, clientTool
   }
 
   const hinted = incoming || normalizeSession(providerSessionId);
-  if (hinted) return translateSessionId(hinted, clientTool);
+  if (hinted) return translateSessionId(hinted, client);
 
-  // Extract x-conversation-id from headers if present
-  if (credentials?.connectionId || bodyHasSessionHints(body) || headersHaveSessionHints(headers)) {
+  // Only consult the session manager when the request carries a real
+  // downstream identity or a conversation hint. Without one it can only
+  // return a random ephemeral id, which would defeat the per-client stable
+  // session below and burn the upstream per-session quota.
+  if (connectionId || bodyHasSessionHints(body) || headersHaveSessionHints(headers)) {
     let explicitClient = body?.prompt_cache_key || body?.session_id || body?.conversation_id;
     if (!explicitClient) {
       for (const [k, v] of Object.entries(headers)) {
@@ -347,28 +375,28 @@ function resolveOpencodeSession(body, credentials, providerSessionId, clientTool
       }
     }
     if (explicitClient) {
-      return translateSessionId(String(explicitClient), clientTool);
+      return translateSessionId(String(explicitClient), client);
     }
+
+    let viaManager = null;
+    try {
+      const sanitizedHeaders = {};
+      for (const [k, v] of Object.entries(headers)) {
+        if (k.toLowerCase() !== "x-client-request-id") sanitizedHeaders[k] = v;
+      }
+      viaManager = resolveSessionId({
+        headers: sanitizedHeaders,
+        body,
+        connectionId,
+        scope: "opencode",
+      });
+    } catch {
+      viaManager = null;
+    }
+    if (viaManager) return translateSessionId(viaManager, client);
   }
 
-  let viaManager = null;
-  try {
-    const sanitizedHeaders = {};
-    for (const [k, v] of Object.entries(headers)) {
-      if (k.toLowerCase() !== "x-client-request-id") sanitizedHeaders[k] = v;
-    }
-    viaManager = resolveSessionId({
-      headers: sanitizedHeaders,
-      body,
-      connectionId: credentials?.connectionId,
-      scope: "opencode",
-    });
-  } catch {
-    viaManager = null;
-  }
-  if (viaManager) return translateSessionId(viaManager, clientTool);
-
-  return stableSessionId(credentials);
+  return stableSessionId(credentials, client);
 }
 
 function normalizeResponsesTools(body) {
