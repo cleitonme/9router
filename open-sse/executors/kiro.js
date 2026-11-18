@@ -11,6 +11,14 @@ import { SSE_DONE, SSE_HEADERS } from "../utils/sseConstants.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { STREAM_FIRST_CHUNK_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { buildKiroIdentityHeaders } from "../shared/kiroIdentity.js";
+import { KIRO_CREATE_RESPONSE, resolveKiroCreateResponseMode } from "../config/kiroClient.js";
+import {
+  buildKiroCreateResponseBody,
+  buildKiroCreateResponseHeaders,
+  buildKiroCreateResponseUrl,
+} from "../utils/kiroCreateResponse.js";
+import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { FORMATS } from "../translator/formats.js";
 
 const KIRO_REPAIR_BUFFER_MAX_BYTES = 8 * 1024 * 1024;
 // Regions per service host; a region outside the set is never spliced into the hostname.
@@ -71,6 +79,32 @@ function crc32(bytes) {
 function envPositiveInt(name, fallback) {
   const parsed = Number.parseInt(process.env?.[name] || "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+// CreateResponse (/v1/responses) only accepts the OAuth/social credentials that
+// runtime.*.kiro.dev recognizes, and only makes sense for a Kiro conversation body.
+function canUseKiroCreateResponse(args) {
+  if (!args?.body?.conversationState) return false;
+  const authMethod = args?.credentials?.providerSpecificData?.authMethod;
+  return !KIRO_CREATE_RESPONSE.unsupportedAuthMethods.has(authMethod);
+}
+
+// Read an error body without consuming the response the caller may still need.
+async function readKiroErrorBody(response) {
+  try {
+    if (typeof response?.clone === "function") return { body: await response.clone().text(), response };
+    const body = await response.text();
+    return {
+      body,
+      response: new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      }),
+    };
+  } catch {
+    return { body: "", response };
+  }
 }
 
 function concatChunks(chunks, totalBytes) {
@@ -374,6 +408,15 @@ export class KiroExecutor extends BaseExecutor {
    * classify the status, and trigger account fallback/cooldown.
    */
   async execute(args) {
+    const mode = resolveKiroCreateResponseMode();
+    const createResponseEligible = mode !== "off" && canUseKiroCreateResponse(args);
+
+    if (mode === "always" && createResponseEligible) {
+      args.log?.debug?.("KIRO", "Using /v1/responses CreateResponse (direct mode)");
+      const direct = await this.executeCreateResponse(args);
+      if (direct) return direct;
+    }
+
     const result = await super.execute(args);
     if (result?.response?.ok) {
       // KIRO_INTEGRITY_GATE=off streams through, forfeiting the tool-call repair retry.
@@ -384,8 +427,71 @@ export class KiroExecutor extends BaseExecutor {
       } else {
         this.attachIntegrityGate(result, args);
       }
+      return result;
     }
+
+    // Accounts enrolled in Kiro's create_response_api experiment (Builder ID,
+    // Student) answer 429 USER_REQUEST_RATE_EXCEEDED on generateAssistantResponse
+    // even with quota left. Retry that one error on /v1/responses; anything else
+    // is returned untouched so account fallback can classify it (#5631).
+    if (createResponseEligible && result?.response?.status === 429) {
+      const { body, response } = await readKiroErrorBody(result.response);
+      result.response = response;
+      if (body.includes(KIRO_CREATE_RESPONSE.rateExceededCode)) {
+        args.log?.warn?.("KIRO", "generateAssistantResponse hit USER_REQUEST_RATE_EXCEEDED, falling back to /v1/responses");
+        const fallback = await this.executeCreateResponse(args);
+        if (fallback) return fallback;
+      }
+    }
+
     return result;
+  }
+
+  async executeCreateResponse(args) {
+    const { model, body, credentials, signal, log, proxyOptions = null } = args;
+    const url = buildKiroCreateResponseUrl(credentials?.providerSpecificData?.region);
+    const createResponseBody = buildKiroCreateResponseBody({ body, credentials, model });
+    const headers = buildKiroCreateResponseHeaders({ credentials, body });
+
+    log?.debug?.("KIRO", `CreateResponse -> ${url} | model=${createResponseBody.model}`);
+
+    const send = () => proxyAwareFetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(createResponseBody),
+      signal,
+    }, proxyOptions);
+
+    let response;
+    try {
+      response = await send();
+      // runtime.*.kiro.dev enforces one concurrent request per account; a burst
+      // can 429 even when the request is valid, so absorb it with one retry.
+      if (response.status === 429 && !signal?.aborted) {
+        log?.warn?.("KIRO", `CreateResponse received 429, retrying in ${KIRO_CREATE_RESPONSE.retryDelayMs}ms`);
+        await new Promise((resolve) => setTimeout(resolve, KIRO_CREATE_RESPONSE.retryDelayMs));
+        if (!signal?.aborted) response = await send();
+      }
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
+      log?.error?.("KIRO", `CreateResponse network failure: ${error?.message || error}`);
+      return null;
+    }
+
+    if (!response.ok) {
+      log?.warn?.("KIRO", `CreateResponse returned status ${response.status}`);
+      return null;
+    }
+
+    // The upstream speaks the Responses API; let the translator layer convert it
+    // so reasoning, parallel tool calls, usage and logging share one implementation.
+    return {
+      response,
+      url,
+      headers,
+      transformedBody: createResponseBody,
+      responseFormat: FORMATS.OPENAI_RESPONSES,
+    };
   }
 
   attachIntegrityGate(result, args) {

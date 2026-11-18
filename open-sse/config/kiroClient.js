@@ -17,3 +17,35 @@ export const KIRO_SDK_CLIENTS = {
   streaming: { api: "codewhispererstreaming", metrics: "E" },
   runtime: { api: "codewhispererruntime", metrics: "N,E" },
 };
+
+// CreateResponse (/v1/responses) — IDE 1.4.x moved primary chat traffic to this
+// surface. The legacy generateAssistantResponse can answer
+// 429 USER_REQUEST_RATE_EXCEEDED on accounts that still have quota left (#5631),
+// so KiroExecutor keeps it as a fallback, never the default route.
+export const KIRO_CREATE_RESPONSE = {
+  urlTemplate: "https://runtime.{region}.kiro.dev/v1/responses",
+  defaultRegion: "us-east-1",
+  // The ACP client identity the IDE uses for this API. The version stays tied to
+  // KIRO_IDE_VERSION so the client-version gate (#5613) keeps one source of truth.
+  userAgent: `KiroIDE-${KIRO_IDE_VERSION}-KiroIDE/acp-client`,
+  agentMode: "vibe",
+  rateExceededCode: "USER_REQUEST_RATE_EXCEEDED",
+  // One retry absorbs the upstream 1-concurrent-request burst window.
+  retryDelayMs: 1500,
+  // These credentials are accepted by the legacy Amazon surfaces but rejected by
+  // runtime.*.kiro.dev (401/403), so the fallback would only burn quota there.
+  unsupportedAuthMethods: new Set(["api_key", "idc", "external_idp"]),
+  modeEnvVars: ["NINEROUTER_KIRO_CREATE_RESPONSE", "KIRO_CREATE_RESPONSE"],
+};
+
+// AWS region shape accepted before a credential-owned `region` is interpolated
+// into an upstream hostname. Anything else (dots, slashes, spaces) would let a
+// connection redirect the request — and its bearer token — off-network (SSRF).
+export const KIRO_REGION_PATTERN = /^[a-z]{2}(?:-[a-z]+)+-\d{1,2}$/;
+
+/** Resolve the CreateResponse mode: "auto" (default), "always" or "off". */
+export function resolveKiroCreateResponseMode(env = process.env) {
+  const raw = env[KIRO_CREATE_RESPONSE.modeEnvVars[0]] ?? env[KIRO_CREATE_RESPONSE.modeEnvVars[1]];
+  const mode = String(raw || "auto").trim().toLowerCase();
+  return mode === "always" || mode === "off" ? mode : "auto";
+}
